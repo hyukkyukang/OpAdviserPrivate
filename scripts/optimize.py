@@ -7,7 +7,7 @@ import argparse
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='scripts/config.ini', help='config file')
+    parser.add_argument('--config', type=str, default='scripts/twitter.ini', help='config file')
     # 2024-11-19 code for clusters
     # parser.add_argument('--knob_config_file', type=str,default='scripts/experiment/gen_knobs/SYSBENCH_randomforest.json')
     # parser.add_argument('--knob_num', type=int,default=118)
