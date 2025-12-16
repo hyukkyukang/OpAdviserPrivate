@@ -23,6 +23,7 @@ default_value = {
 'remote_mode': 'True',
 'pid':0,
 'max_runs': 200,
+'runtime_limit': None,  # Time budget in seconds; None means no limit (use max_runs only)
 'knob_num': 'auto',
 'selector_type': 'shap',
 'initial_runs' : 10,

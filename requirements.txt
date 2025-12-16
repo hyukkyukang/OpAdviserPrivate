@@ -1,6 +1,6 @@
 pandas==1.4.4
 numpy<2.1.0
-scikit_learn==1
+scikit-learn>=1.0,<1.4
 torch>=1.5.0
 mysql-connector-python-rf==2.2.2
 ConfigSpace==0.4.21

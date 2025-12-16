@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.cursor/
+
+# Logs and temp files
+*.log
+logs/
+*.tmp
+*.temp
+
+# Large files that shouldn't be in the image
+*.tar
+*.tar.gz
+*.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files (avoid recursive issues)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+

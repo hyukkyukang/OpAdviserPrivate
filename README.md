@@ -1,673 +1,915 @@
-# OpAdviserPlus
-## Setup Dev Container
-Fix mounts attribute in .devcontainer/devcontainer.json to mount directories to SSDs (performances may degrade if code and /var/lib/mysql is in slow disk)
+# OpAdviser: Automated Database Configuration Tuning
 
-Setup dev container using .devcontainer/devcontainer.json
-## Reproduce Experiment Results
-### Sysbench RW
-```shell
-cd /
-rm -rf sysbench
-git clone https://github.com/akopytov/sysbench.git && \
-    cd sysbench && \
-    git checkout ead2689ac6f61c5e7ba7c6e19198b86bd3a51d3c && \
-    ./autogen.sh && \
-    ./configure && \
-    make && make install
-mysql -ppassword -e"drop database sbrw;"
-mysql -ppassword -e"create database sbrw;"
-sysbench  \
-    --db-driver=mysql  \
-    --mysql-host=localhost  \
-    --mysql-port=3306  \
-    --mysql-user=root  \
-    --mysql-password=password  \
-    --table_size=800000  \
-    --tables=300  \
-    --events=0  \
-    --threads=80  \
-    --mysql-db=sbrw  \
-    oltp_read_write  \
-    prepare
-cd /workspaces/OpAdviserPrivate
-export PYTHONPATH="."
-python scripts/optimize.py --dbname=sbrw --workload=sysbench --workload_type=sbrw --softmax_weight --transformer
-python scripts/optimize.py --dbname=sbrw --workload=sysbench --workload_type=sbrw 
+OpAdviser is an intelligent database tuning system that automatically optimizes database configurations (knobs) to improve performance metrics like throughput (TPS) and latency. It leverages **transfer learning** from historical tuning data across different workloads to accelerate optimization.
+
+## 📋 Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Evaluating OpAdviser Performance](#evaluating-opadviser-performance)
+  - [Quick Evaluation (Fast Mode)](#-quick-evaluation-fast-mode---recommended-for-first-time-users)
+  - [Ultra-Fast Evaluation](#-ultra-fast-evaluation-50-minutes-total)
+  - [CPU & Disk I/O Focused Experiment](#-cpu--disk-io-focused-experiment-recommended)
+- [Configuration Options](#configuration-options)
+- [Supported Workloads](#supported-workloads)
+- [Project Structure](#project-structure)
+
+---
+
+## Overview
+
+### What OpAdviser Does
+
+1. **Tunes database knobs** (e.g., `innodb_buffer_pool_size`, `innodb_io_capacity`) to maximize performance
+2. **Transfers knowledge** from previously tuned workloads to accelerate new tuning tasks
+3. **Automatically prunes the search space** based on workload similarity
+4. **Supports multiple optimization algorithms**: Bayesian Optimization (SMAC, MBO), Reinforcement Learning (DDPG), Genetic Algorithm (GA)
+
+### Key Innovation: Space Transfer
+
+OpAdviser uses **RGPE (Ranking-weighted Gaussian Process Ensemble)** to:
+- Measure similarity between workloads
+- Identify "promising regions" in the configuration space
+- Focus search on configurations that worked well for similar workloads
+
+---
+
+## Architecture
+
 ```
-### Sysbench WO
-```shell
-cd /
-rm -rf sysbench
-git clone https://github.com/akopytov/sysbench.git && \
-    cd sysbench && \
-    git checkout ead2689ac6f61c5e7ba7c6e19198b86bd3a51d3c && \
-    ./autogen.sh && \
-    ./configure && \
-    make && make install
-mysql -ppassword -e"drop database sbwrite;"
-mysql -ppassword -e"create database sbwrite;"
-sysbench  \
-    --db-driver=mysql  \
-    --mysql-host=localhost  \
-    --mysql-port=3306  \
-    --mysql-user=root  \
-    --mysql-password=password  \
-    --table_size=800000  \
-    --tables=300  \
-    --events=0  \
-    --threads=80  \
-    --mysql-db=sbwrite  \
-    oltp_write_only  \
-    prepare
-cd /workspaces/OpAdviserPrivate
-export PYTHONPATH="."
-python scripts/optimize.py --dbname=sbwrite --workload=sysbench --workload_type=sbwrite --softmax_weight --transformer
-python scripts/optimize.py --dbname=sbwrite --workload=sysbench --workload_type=sbwrite
+┌─────────────────────────────────────────────────────────────────────┐
+│                         OpAdviser Pipeline                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────────┐ │
+│  │   Source    │    │    RGPE     │    │   Configuration Space   │ │
+│  │  Workloads  │───▶│  Similarity │───▶│       Pruning           │ │
+│  │  (repo/)    │    │  Calculation│    │                         │ │
+│  └─────────────┘    └─────────────┘    └───────────┬─────────────┘ │
+│                                                     │               │
+│                                                     ▼               │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────────┐ │
+│  │   Target    │◀───│  Optimizer  │◀───│   Acquisition Function  │ │
+│  │  Database   │    │ (SMAC/DDPG/ │    │   Maximization          │ │
+│  │             │    │  GA/MBO)    │    │                         │ │
+│  └─────────────┘    └─────────────┘    └─────────────────────────┘ │
+│         │                                                           │
+│         ▼                                                           │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Benchmark Execution → Metrics Collection → History Update  │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
-### Sysbench RO
-```shell
-cd /
-rm -rf sysbench
-git clone https://github.com/akopytov/sysbench.git && \
-    cd sysbench && \
-    git checkout ead2689ac6f61c5e7ba7c6e19198b86bd3a51d3c && \
-    ./autogen.sh && \
-    ./configure && \
-    make && make install
-mysql -ppassword -e"drop database sbread;"
-mysql -ppassword -e"create database sbread;"
-sysbench  \
-    --db-driver=mysql  \
-    --mysql-host=localhost  \
-    --mysql-port=3308  \
-    --mysql-user=root  \
-    --mysql-password=password  \
-    --table_size=800000  \
-    --tables=300  \
-    --events=0  \
-    --threads=80  \
-    --mysql-db=sbread  \
-    oltp_read_only  \
-    prepare
-cd /workspaces/OpAdviserPrivate
+
+---
+
+## Prerequisites
+
+### Hardware Requirements
+- **Recommended**: 32GB+ RAM, SSD storage
+- MySQL 8.0+ or PostgreSQL 12+
+
+### Software Requirements
+- Python 3.8+
+- MySQL Server or PostgreSQL Server
+- Benchmark tools (Sysbench, OLTP-Bench)
+
+---
+
+## Installation
+
+### 1. Clone and Setup
+
+```bash
+git clone <repository-url>
+cd OpAdviserPrivate
+pip install -r requirements.txt
 export PYTHONPATH="."
-python scripts/optimize.py --dbname=sbread --workload=sysbench --workload_type=sbread --softmax_weight --transformer
-python scripts/optimize.py --dbname=sbread --workload=sysbench --workload_type=sbread
 ```
-### Wikipedia
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
 
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd /workspaces/OpAdviserPrivate
-mysql -ppassword -e"drop database wikipedia;"
-mysql -ppassword -e"create database wikipedia;"
-/oltpbench/oltpbenchmark -b wikipedia -c /oltpbench/config/sample_wikipedia_config.xml  --create=true --load=true --verbose
+### 2. Install Sysbench (for Sysbench workloads)
 
+```bash
+git clone https://github.com/akopytov/sysbench.git
+cd sysbench
+git checkout ead2689ac6f61c5e7ba7c6e19198b86bd3a51d3c
+./autogen.sh && ./configure && make && sudo make install
+cd ..
+```
+
+### 3. Install OLTP-Bench (for TPC-C, Twitter, YCSB, etc.)
+
+```bash
+git clone https://github.com/seokjeongeum/oltpbench.git
+cd oltpbench
+ant bootstrap && ant resolve && ant build
+chmod 777 /oltpbench/*
+cd ..
+```
+
+---
+
+## Quick Start
+
+### Step 1: Prepare Database and Workload
+
+Example for Sysbench Read-Write:
+
+```bash
+# Create database
+mysql -uroot -ppassword -e "CREATE DATABASE IF NOT EXISTS sbrw;"
+
+# Load data
+sysbench \
+    --db-driver=mysql \
+    --mysql-host=localhost \
+    --mysql-port=3306 \
+    --mysql-user=root \
+    --mysql-password=password \
+    --table_size=800000 \
+    --tables=300 \
+    --threads=80 \
+    --mysql-db=sbrw \
+    oltp_read_write prepare
+```
+
+### Step 2: Run OpAdviser
+
+```bash
+python scripts/optimize.py \
+    --dbname=sbrw \
+    --workload=sysbench \
+    --workload_type=sbrw \
+    --softmax_weight \
+    --transformer
+```
+
+### Step 3: Monitor Progress
+
+Results are saved to:
+- `repo/history_<task_id>.json` - Tuning history
+- `logs/` - Detailed logs
+- `<task_id>.png` - Convergence plot
+
+---
+
+## Evaluating OpAdviser Performance
+
+To properly evaluate OpAdviser, you need to compare it against a **ground truth baseline** on your specific hardware.
+
+### ⚡ Quick Evaluation (Fast Mode) - Recommended for First-Time Users
+
+For quick testing (~3 hours total instead of ~30 hours):
+
+```bash
+# 1. Prepare smaller dataset
+mysql -uroot -ppassword -e "DROP DATABASE IF EXISTS sbrw; CREATE DATABASE sbrw;"
+sysbench \
+    --db-driver=mysql \
+    --mysql-host=localhost \
+    --mysql-port=3306 \
+    --mysql-user=root \
+    --mysql-password=password \
+    --table_size=100000 \
+    --tables=50 \
+    --threads=80 \
+    --mysql-db=sbrw \
+    oltp_read_write prepare
+
+# 2. Run Ground Truth (Fast) - ~2.5 hours
+python scripts/optimize.py --config=scripts/config_ground_truth_fast.ini
+
+# 3. Run OpAdviser (Fast) - ~45 minutes  
+python scripts/optimize.py --config=scripts/config_opadviser_fast.ini
+
+# 4. Compare results
+python scripts/compare_results.py \
+    --opadviser=sbrw_opadviser_fast \
+    --ground_truth=sbrw_ground_truth_fast \
+    --plot
+```
+
+### Speed Optimization Options
+
+| Parameter | Full Experiment | Fast Experiment | Impact |
+|-----------|-----------------|-----------------|--------|
+| `max_runs` | 500 (GT) / 100 (OP) | 100 (GT) / 30 (OP) | Fewer iterations |
+| `knob_num` | 197 | 20 | Smaller search space |
+| `workload_time` | 180s | 60s | Shorter benchmark per iteration |
+| `workload_warmup_time` | 10s | 5s | Less warmup |
+| `online_mode` | False | True | No MySQL restart (faster) |
+| `table_size` | 800,000 | 100,000 | Smaller dataset |
+| `tables` | 300 | 50 | Fewer tables |
+
+**Time Estimates:**
+
+| Mode | Ground Truth | OpAdviser | Total |
+|------|--------------|-----------|-------|
+| **Full** | ~25 hours | ~5 hours | ~30 hours |
+| **Fast** | ~2.5 hours | ~45 min | ~3.5 hours |
+| **Ultra-Fast** | ~35 min | ~15 min | ~50 min |
+
+### 🚀 Ultra-Fast Evaluation (~50 minutes total)
+
+For the quickest possible test. This uses **online mode** (no MySQL restarts) with **dynamically-changeable knobs only**.
+
+#### Prerequisites
+
+Before running, ensure these are set up:
+
+```bash
+# 1. Set required environment variables
 export PYTHONPATH="."
-python scripts/optimize.py --softmax_weight --transformer
-python scripts/optimize.py 
-```
-### Twitter
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
+export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
 
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd /workspaces/OpAdviserPrivate
-mysql -ppassword -e"drop database twitter;"
-mysql -ppassword -e"create database twitter;"
-/oltpbench/oltpbenchmark -b twitter -c /oltpbench/config/sample_twitter_config.xml  --create=true --load=true --verbose
+# 2. Verify MySQL is running
+service mysql status
+# If not running: service mysql start
+
+# 3. Verify sysbench is installed
+sysbench --version
+# Should show: sysbench 1.0.x
+```
+
+#### Step-by-Step Instructions
+
+```bash
+# Step 1: Prepare minimal dataset (~1 minute)
+mysql -uroot -ppassword -e "DROP DATABASE IF EXISTS sbrw; CREATE DATABASE sbrw;"
+sysbench \
+    --db-driver=mysql \
+    --mysql-host=localhost \
+    --mysql-port=3306 \
+    --mysql-user=root \
+    --mysql-password=password \
+    --table_size=50000 \
+    --tables=20 \
+    --threads=40 \
+    --mysql-db=sbrw \
+    oltp_read_write prepare
+
+# Step 2: Run Ground Truth (~25 minutes, 50 iterations × 30s each)
+export PYTHONPATH="." && export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
+python scripts/optimize.py --config=scripts/config_ground_truth_ultrafast.ini
+
+# Step 3: Run OpAdviser (~8 minutes, 15 iterations × 30s each)
+export PYTHONPATH="." && export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
+python scripts/optimize.py --config=scripts/config_opadviser_ultrafast.ini
+
+# Step 4: Compare results
+python scripts/compare_results.py \
+    --opadviser=sbrw_opadviser_ultrafast \
+    --ground_truth=sbrw_ground_truth_ultrafast \
+    --plot
+```
+
+#### Ultra-Fast Configuration Details
+
+| Setting | Ground Truth | OpAdviser |
+|---------|--------------|-----------|
+| Config file | `config_ground_truth_ultrafast.ini` | `config_opadviser_ultrafast.ini` |
+| Knob file | `mysql_dynamic_10.json` | `mysql_dynamic_10.json` |
+| Knobs | 10 (dynamically changeable) | 10 |
+| Iterations | 50 | 15 |
+| Benchmark time | 30s | 30s |
+| `space_transfer` | False | True |
+| `optimize_method` | SMAC | DDPG |
+| `online_mode` | True | True |
+
+#### Knobs Tuned in Ultra-Fast Mode
+
+These 10 knobs can be changed without restarting MySQL:
+
+| Knob | Description | Range |
+|------|-------------|-------|
+| `innodb_io_capacity` | Background I/O ops/sec | 100 - 200,000 |
+| `innodb_io_capacity_max` | Max I/O capacity | 100 - 400,000 |
+| `innodb_thread_concurrency` | Max threads in InnoDB | 0 - 1,000 |
+| `innodb_spin_wait_delay` | Spin lock delay (µs) | 0 - 6,000 |
+| `innodb_max_dirty_pages_pct` | Max dirty page % | 0 - 99 |
+| `thread_cache_size` | Cached threads | 0 - 16,384 |
+| `table_open_cache` | Table cache size | 1 - 100,000 |
+| `sort_buffer_size` | Sort buffer | 32KB - 128MB |
+| `read_buffer_size` | Read buffer | 8KB - 2GB |
+| `join_buffer_size` | Join buffer | 128B - 4GB |
+
+**⚠️ Trade-offs of Ultra-Fast Mode:**
+- Fewer iterations → Less reliable "best" configuration found
+- Only 10 knobs → May miss optimal configurations involving other knobs
+- Online mode → Static knobs (requiring restart) are excluded
+
+**Recommendation:** Use Ultra-Fast for initial testing and learning. For production tuning, use the CPU/IO focused or full evaluation.
+
+---
+
+### 🎯 Ultra-Fast CPU & I/O Focused Experiment (Recommended for Performance Tuning)
+
+For targeted tuning of **CPU usage and Disk I/O performance**, we provide a curated set of knobs that directly impact these resources.
+
+#### Why Focus on CPU & I/O?
+
+- **High impact**: These knobs have the largest effect on database performance
+- **More interpretable**: All knobs directly affect CPU or I/O
+- **Faster convergence**: Smaller, focused search space
+
+---
+
+#### 🚀 Ultra-Fast CPU/IO Mode (~1.5 hours total)
+
+Uses **15 dynamically-changeable CPU/IO knobs** with online mode (no MySQL restarts).
+
+##### Prerequisites
+
+```bash
+# Set required environment variables
 export PYTHONPATH="."
-python scripts/optimize.py --dbname=twitter --workload=oltpbench_twitter --softmax_weight --transformer
-python scripts/optimize.py --dbname=twitter --workload=oltpbench_twitter 
-```
-### TPC-C
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
+export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
 
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd /workspaces/OpAdviserPrivate
-mysql -ppassword -e"drop database tpcc;"
-mysql -ppassword -e"create database tpcc;"
-/oltpbench/oltpbenchmark -b tpcc -c /oltpbench/config/sample_tpcc_config.xml  --create=true --load=true --verbose
+# Verify MySQL is running
+service mysql status
+```
+
+##### Step-by-Step Instructions
+
+```bash
+# Step 1: Prepare minimal dataset (~1 minute)
+mysql -uroot -ppassword -e "DROP DATABASE IF EXISTS sbrw; CREATE DATABASE sbrw;"
+sysbench \
+    --db-driver=mysql \
+    --mysql-host=localhost \
+    --mysql-port=3306 \
+    --mysql-user=root \
+    --mysql-password=password \
+    --table_size=50000 \
+    --tables=20 \
+    --threads=40 \
+    --mysql-db=sbrw \
+    oltp_read_write prepare
+
+# Step 2: Run Ground Truth (~60 minutes, 100 iterations × 30s each)
+export PYTHONPATH="." && export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
+python scripts/optimize.py --config=scripts/config_cpu_io_ground_truth_ultrafast.ini
+
+# Step 3: Run OpAdviser (~25 minutes, 40 iterations × 30s each)
+export PYTHONPATH="." && export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
+python scripts/optimize.py --config=scripts/config_cpu_io_opadviser_ultrafast.ini
+
+# Step 4: Compare results
+python scripts/compare_results.py \
+    --opadviser=sbrw_cpu_io_opadviser_ultrafast \
+    --ground_truth=sbrw_cpu_io_ground_truth_ultrafast \
+    --plot
+```
+
+##### CPU/IO Knobs Tuned (15 dynamically-changeable knobs)
+
+| Category | Knob | Description |
+|----------|------|-------------|
+| **I/O Capacity** | `innodb_io_capacity` | Background I/O ops/sec (100-200K) |
+| | `innodb_io_capacity_max` | Max I/O capacity (100-400K) |
+| **Threading** | `innodb_thread_concurrency` | Max concurrent InnoDB threads (0-1000) |
+| | `thread_cache_size` | Cached thread connections (0-16K) |
+| **Spin/Wait** | `innodb_spin_wait_delay` | Spin lock delay µs (0-6000) |
+| | `innodb_sync_spin_loops` | Spin loops before sleep (0-30K) |
+| **Dirty Pages** | `innodb_max_dirty_pages_pct` | Max dirty page % (0-99) |
+| | `innodb_max_dirty_pages_pct_lwm` | Dirty page low water mark (0-99) |
+| **Flushing** | `innodb_flushing_avg_loops` | Flushing average loops (1-1000) |
+| | `innodb_lru_scan_depth` | LRU scan depth (100-10K) |
+| **Caching** | `table_open_cache` | Open table cache (1-100K) |
+| | `innodb_old_blocks_time` | Old blocks time ms (0-4B) |
+| **Buffers** | `sort_buffer_size` | Sort buffer (32KB-128MB) |
+| | `read_buffer_size` | Sequential read buffer (8KB-2GB) |
+| | `join_buffer_size` | Join buffer (128B-4GB) |
+
+##### Ultra-Fast CPU/IO Configuration Details
+
+| Setting | Ground Truth | OpAdviser |
+|---------|--------------|-----------|
+| Config file | `config_cpu_io_ground_truth_ultrafast.ini` | `config_cpu_io_opadviser_ultrafast.ini` |
+| Knob file | `mysql_cpu_io_dynamic_15.json` | `mysql_cpu_io_dynamic_15.json` |
+| Knobs | 15 | 15 |
+| Iterations | 100 | 40 |
+| Time estimate | ~60 min | ~25 min |
+| `online_mode` | True | True |
+
+---
+
+#### ⏱️ Standard CPU/IO Mode (~10 hours total)
+
+Uses **39 CPU/IO knobs** including static knobs (requires MySQL restarts).
+
+##### Knobs Included (39 total)
+
+| Category | Count | Examples |
+|----------|-------|----------|
+| **CPU/Threading** | 12 | `innodb_thread_concurrency`, `innodb_read_io_threads`, `innodb_write_io_threads`, `innodb_purge_threads` |
+| **Disk I/O Capacity** | 6 | `innodb_io_capacity`, `innodb_flush_log_at_trx_commit`, `innodb_doublewrite` |
+| **Buffer/Memory** | 8 | `innodb_buffer_pool_size`, `innodb_log_buffer_size`, `innodb_log_file_size` |
+| **Flushing/Dirty Pages** | 8 | `innodb_max_dirty_pages_pct`, `innodb_adaptive_flushing`, `sync_binlog` |
+| **Read Ahead/Caching** | 5 | `innodb_read_ahead_threshold`, `innodb_lru_scan_depth`, `table_open_cache` |
+
+##### Running Standard CPU/IO Experiments
+
+```bash
+# 1. Prepare database
+mysql -uroot -ppassword -e "DROP DATABASE IF EXISTS sbrw; CREATE DATABASE sbrw;"
+sysbench \
+    --db-driver=mysql \
+    --mysql-host=localhost \
+    --mysql-port=3306 \
+    --mysql-user=root \
+    --mysql-password=password \
+    --table_size=100000 \
+    --tables=50 \
+    --threads=80 \
+    --mysql-db=sbrw \
+    oltp_read_write prepare
+
+# 2. Run Ground Truth (CPU/IO focused) - ~6-8 hours
+export PYTHONPATH="." && export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
+python scripts/optimize.py --config=scripts/config_cpu_io_ground_truth.ini
+
+# 3. Run OpAdviser (CPU/IO focused) - ~2-3 hours
+export PYTHONPATH="." && export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
+python scripts/optimize.py --config=scripts/config_cpu_io_opadviser.ini
+
+# 4. Compare results
+python scripts/compare_results.py \
+    --opadviser=sbrw_cpu_io_opadviser \
+    --ground_truth=sbrw_cpu_io_ground_truth \
+    --plot
+```
+
+##### Standard CPU/IO Configuration Details
+
+| Setting | Ground Truth | OpAdviser |
+|---------|--------------|-----------|
+| Config file | `config_cpu_io_ground_truth.ini` | `config_cpu_io_opadviser.ini` |
+| Knob file | `mysql_cpu_io_40.json` | `mysql_cpu_io_40.json` |
+| Knobs | 39 | 39 |
+| Iterations | 150 | 50 |
+| Time estimate | ~6-8 hours | ~2-3 hours |
+| `space_transfer` | False | True |
+| `optimize_method` | SMAC | DDPG |
+| `online_mode` | False | False |
+
+#### Detailed Knob List
+
+<details>
+<summary>Click to expand full knob list</summary>
+
+**CPU/Threading (12 knobs)**
+| Knob | Range | Description |
+|------|-------|-------------|
+| `innodb_thread_concurrency` | 0-1000 | Max concurrent threads in InnoDB |
+| `innodb_read_io_threads` | 1-64 | Background read I/O threads |
+| `innodb_write_io_threads` | 1-64 | Background write I/O threads |
+| `innodb_purge_threads` | 1-32 | Purge operation threads |
+| `innodb_page_cleaners` | 1-8 | Page cleaner threads |
+| `innodb_spin_wait_delay` | 0-6000 | Spin lock delay (µs) |
+| `innodb_sync_spin_loops` | 0-30000 | Spin loops before sleeping |
+| `innodb_adaptive_max_sleep_delay` | 0-1000000 | Max adaptive sleep (µs) |
+| `innodb_thread_sleep_delay` | 0-1000000 | Thread sleep delay (µs) |
+| `innodb_concurrency_tickets` | 1-4B | Concurrency tickets |
+| `thread_cache_size` | 0-16384 | Cached threads |
+| `innodb_commit_concurrency` | 0-1000 | Commit concurrency |
+
+**Disk I/O Capacity (6 knobs)**
+| Knob | Range | Description |
+|------|-------|-------------|
+| `innodb_io_capacity` | 100-2M | Background I/O ops/sec |
+| `innodb_io_capacity_max` | 100-40K | Max I/O capacity |
+| `innodb_flush_neighbors` | 0/1/2 | Flush neighboring pages |
+| `innodb_flush_log_at_trx_commit` | 0/1/2 | Durability vs performance |
+| `innodb_doublewrite` | ON/OFF | Double write buffer |
+| `innodb_use_native_aio` | ON/OFF | Native async I/O |
+
+**Buffer/Memory (8 knobs)**
+| Knob | Range | Description |
+|------|-------|-------------|
+| `innodb_buffer_pool_size` | 10GB-32GB | Main buffer pool |
+| `innodb_log_buffer_size` | 256KB-4GB | Redo log buffer |
+| `innodb_log_file_size` | 4MB-1GB | Redo log file size |
+| `innodb_log_files_in_group` | 2-10 | Number of log files |
+| `innodb_change_buffer_max_size` | 0-50% | Change buffer size |
+| `key_buffer_size` | 8B-16GB | MyISAM key buffer |
+| `read_buffer_size` | 8KB-2GB | Sequential read buffer |
+| `sort_buffer_size` | 32KB-128MB | Sort buffer |
+
+**Flushing/Dirty Pages (8 knobs)**
+| Knob | Range | Description |
+|------|-------|-------------|
+| `innodb_max_dirty_pages_pct` | 0-99% | Max dirty page percentage |
+| `innodb_max_dirty_pages_pct_lwm` | 0-99% | Low water mark |
+| `innodb_adaptive_flushing` | ON/OFF | Adaptive flushing |
+| `innodb_adaptive_flushing_lwm` | 0-70 | Adaptive flushing LWM |
+| `innodb_flushing_avg_loops` | 1-1000 | Flushing average loops |
+| `innodb_flush_log_at_timeout` | 1-2700s | Flush timeout |
+| `innodb_flush_sync` | ON/OFF | Flush sync |
+| `sync_binlog` | 0-4B | Binlog sync frequency |
+
+**Read Ahead/Caching (5 knobs)**
+| Knob | Range | Description |
+|------|-------|-------------|
+| `innodb_read_ahead_threshold` | 0-64 | Read ahead threshold |
+| `innodb_random_read_ahead` | ON/OFF | Random read ahead |
+| `innodb_lru_scan_depth` | 100-10240 | LRU scan depth |
+| `innodb_old_blocks_time` | 0-4B ms | Old blocks time |
+| `table_open_cache` | 1-250K | Table cache |
+
+</details>
+
+#### Customizing the Knob Set
+
+To create your own custom knob configuration:
+
+```python
+import json
+
+# Load all knobs
+with open('scripts/experiment/gen_knobs/mysql_all_197_32G.json') as f:
+    all_knobs = json.load(f)
+
+# Select your knobs
+my_knobs = ['innodb_buffer_pool_size', 'innodb_io_capacity', ...]
+
+# Create filtered config
+filtered = {k: all_knobs[k] for k in my_knobs if k in all_knobs}
+
+# Save
+with open('scripts/experiment/gen_knobs/my_custom_knobs.json', 'w') as f:
+    json.dump(filtered, f, indent=4)
+```
+
+Then update your config file:
+```ini
+knob_config_file = scripts/experiment/gen_knobs/my_custom_knobs.json
+knob_num = <number_of_knobs>
+```
+
+---
+
+### Understanding the Evaluation Setup
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     EVALUATION WORKFLOW                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  PHASE 1: Generate Ground Truth (One-time, per workload)           │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Run extensive random/SMAC search (500+ iterations)         │   │
+│  │  This establishes the "best possible" TPS on your hardware  │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              ↓                                      │
+│  PHASE 2: Run OpAdviser                                            │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Run OpAdviser with space_transfer=True (100 iterations)    │   │
+│  │  This tests how well OpAdviser performs                     │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              ↓                                      │
+│  PHASE 3: Compare Results                                          │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Compare: OpAdviser TPS vs Ground Truth TPS                 │   │
+│  │  Metrics: Final TPS, Convergence Speed, Iterations Needed   │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Step-by-Step Evaluation Guide
+
+#### Step 1: Choose a Target Workload
+
+Select one of the supported workloads to evaluate:
+
+| Workload | Command |
+|----------|---------|
+| Sysbench RW | `--workload=sysbench --workload_type=sbrw` |
+| Sysbench RO | `--workload=sysbench --workload_type=sbread` |
+| Sysbench WO | `--workload=sysbench --workload_type=sbwrite` |
+| Twitter | `--workload=oltpbench_twitter` |
+| TPC-C | `--workload=oltpbench_tpcc` |
+| YCSB | `--workload=oltpbench_ycsb` |
+
+#### Step 2: Create Ground Truth Config
+
+Create `scripts/config_ground_truth.ini`:
+
+```ini
+[database]
+db = mysql
+host = localhost
+port = 3306
+user = root
+passwd = password
+sock = /var/run/mysqld/mysqld.sock
+cnf = scripts/template/experiment_normandy.cnf
+mysqld = /usr/sbin/mysqld
+knob_config_file = scripts/experiment/gen_knobs/mysql_all_197_32G.json
+knob_num = 197
+dbname = sbrw
+workload = sysbench
+oltpbench_config_xml = 
+workload_type = sbrw
+thread_num = 80
+workload_warmup_time = 10
+workload_time = 180
+remote_mode = False
+online_mode = False
+isolation_mode = False
+pid = 0
+
+[tune]
+task_id = sbrw_ground_truth
+performance_metric = ['tps']
+reference_point = [None, None]
+constraints = 
+max_runs = 500
+selector_type = shap
+initial_runs = 10
+initial_tunable_knob_num = 197
+incremental = none
+optimize_method = SMAC
+space_transfer = False
+auto_optimizer = False
+acq_optimizer_type = local_random
+batch_size = 16
+mean_var_file = 
+transfer_framework = none
+data_repo = repo
+only_knob = False
+only_range = False
+```
+
+**Key settings for ground truth:**
+- `max_runs = 500` (or more) - Extensive search
+- `space_transfer = False` - No transfer learning (pure baseline)
+- `optimize_method = SMAC` - Standard Bayesian optimization
+
+#### Step 3: Generate Ground Truth
+
+```bash
+# This takes a LONG time (~25+ hours for 500 iterations)
+python scripts/optimize.py --config=scripts/config_ground_truth.ini
+```
+
+#### Step 4: Create OpAdviser Config
+
+Create `scripts/config_opadviser.ini`:
+
+```ini
+[database]
+# ... same database settings as ground truth ...
+dbname = sbrw
+workload = sysbench
+workload_type = sbrw
+
+[tune]
+task_id = sbrw_opadviser
+performance_metric = ['tps']
+max_runs = 100
+optimize_method = DDPG
+space_transfer = True
+auto_optimizer = False
+transfer_framework = none
+data_repo = repo
+# ... other settings ...
+```
+
+**Key settings for OpAdviser:**
+- `max_runs = 100` - Fewer iterations (testing efficiency)
+- `space_transfer = True` - Enable transfer learning
+- `optimize_method = DDPG` - Use DDPG optimizer
+
+#### Step 5: Run OpAdviser
+
+```bash
+python scripts/optimize.py --config=scripts/config_opadviser.ini
+```
+
+Or use command-line arguments:
+
+```bash
+python scripts/optimize.py \
+    --dbname=sbrw \
+    --workload=sysbench \
+    --workload_type=sbrw \
+    --softmax_weight \
+    --transformer
+```
+
+#### Step 6: Compare Results
+
+```python
+import json
+
+# Load ground truth
+with open("repo/history_sbrw_ground_truth.json") as f:
+    gt_data = json.load(f)["data"]
+    gt_best = max(gt_data, key=lambda x: x["external_metrics"].get("tps", 0))
+    gt_tps = gt_best["external_metrics"]["tps"]
+
+# Load OpAdviser result
+with open("repo/history_sbrw_opadviser.json") as f:
+    op_data = json.load(f)["data"]
+    op_best = max(op_data, key=lambda x: x["external_metrics"].get("tps", 0))
+    op_tps = op_best["external_metrics"]["tps"]
+
+print(f"Ground Truth Best TPS: {gt_tps}")
+print(f"OpAdviser Best TPS: {op_tps}")
+print(f"OpAdviser achieved {op_tps/gt_tps*100:.1f}% of ground truth")
+print(f"OpAdviser iterations: {len(op_data)}, Ground Truth iterations: {len(gt_data)}")
+```
+
+### Pre-collected Historical Data
+
+The `repo/` directory contains **~430 pre-collected tuning histories** from various workloads and optimizers. These serve as **source knowledge** for transfer learning:
+
+```
+repo/
+├── history_sysbench_smac_*.json    # Sysbench with SMAC
+├── history_twitter_ddpg_*.json     # Twitter with DDPG
+├── history_tpcc_mbo_*.json         # TPC-C with MBO
+├── history_job_ga_*.json           # JOB with GA
+└── ...
+```
+
+**Note**: These are from the original authors' hardware. For accurate transfer learning, the historical data should ideally be from similar hardware configurations.
+
+---
+
+## Configuration Options
+
+### Key Configuration Parameters
+
+| Parameter | Description | Options |
+|-----------|-------------|---------|
+| `optimize_method` | Optimization algorithm | `SMAC`, `MBO`, `DDPG`, `GA`, `TPE`, `TurBO` |
+| `space_transfer` | Enable space pruning via transfer | `True`, `False` |
+| `auto_optimizer` | Auto-select optimizer | `True`, `False` |
+| `max_runs` | Maximum tuning iterations | Integer (e.g., 100) |
+| `initial_runs` | Initial random exploration | Integer (e.g., 10) |
+| `knob_num` | Number of knobs to tune | Integer (e.g., 197) |
+
+### Optimizer Descriptions
+
+| Optimizer | Type | Best For |
+|-----------|------|----------|
+| **SMAC** | Bayesian Optimization (Random Forest) | High-dimensional spaces |
+| **MBO** | Bayesian Optimization (Gaussian Process) | Lower-dimensional, continuous |
+| **DDPG** | Reinforcement Learning | Learning from internal metrics |
+| **GA** | Genetic Algorithm | Discrete/mixed spaces |
+| **TPE** | Tree-structured Parzen Estimator | Categorical-heavy configs |
+
+---
+
+## Supported Workloads
+
+| Workload | Benchmark Tool | Type | Command |
+|----------|----------------|------|---------|
+| Sysbench RW | Sysbench | OLTP | `--workload=sysbench --workload_type=sbrw` |
+| Sysbench RO | Sysbench | OLTP | `--workload=sysbench --workload_type=sbread` |
+| Sysbench WO | Sysbench | OLTP | `--workload=sysbench --workload_type=sbwrite` |
+| TPC-C | OLTP-Bench | OLTP | `--workload=oltpbench_tpcc` |
+| Twitter | OLTP-Bench | OLTP | `--workload=oltpbench_twitter` |
+| Wikipedia | OLTP-Bench | OLTP | `--workload=oltpbench_wikipedia` |
+| YCSB | OLTP-Bench | Key-Value | `--workload=oltpbench_ycsb` |
+| TATP | OLTP-Bench | OLTP | `--workload=oltpbench_tatp` |
+| Voter | OLTP-Bench | OLTP | `--workload=oltpbench_voter` |
+| TPC-H | Custom SQL | OLAP | `--workload=tpch` |
+| JOB | Custom SQL | OLAP | `--workload=job` |
+
+---
+
+## Project Structure
+
+```
+OpAdviserPrivate/
+├── autotune/                    # Core tuning library
+│   ├── database/                # Database connectors (MySQL, PostgreSQL)
+│   ├── optimizer/               # Optimization algorithms
+│   │   ├── bo_optimizer.py      # Bayesian Optimization
+│   │   ├── ddpg_optimizer.py    # DDPG (RL-based)
+│   │   ├── ga_optimizer.py      # Genetic Algorithm
+│   │   └── surrogate/           # Surrogate models (GP, RF, DDPG)
+│   ├── pipleline/               # Main tuning pipeline
+│   ├── transfer/                # Transfer learning (RGPE, workload mapping)
+│   ├── selector/                # Knob selection (SHAP, FANOVA)
+│   ├── tuner.py                 # Main DBTuner class
+│   ├── dbenv.py                 # Database environment
+│   └── knobs.py                 # Knob configuration handling
+├── scripts/
+│   ├── optimize.py              # Main entry point
+│   ├── config.ini               # Default configuration
+│   └── experiment/gen_knobs/    # Knob definition files
+├── repo/                        # Historical tuning data (source knowledge)
+├── logs/                        # Tuning logs
+└── requirements.txt             # Python dependencies
+```
+
+---
+
+## Troubleshooting
+
+### Environment Setup Issues
+
+1. **Missing `PYTHONPATH` or `MYSQL_SOCK`**
+   ```bash
+   # Always set these before running
+   export PYTHONPATH="."
+   export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
+   ```
+
+2. **MySQL authentication error** (`caching_sha2_password not supported`)
+   ```bash
+   # Install newer MySQL connector
+   pip install mysql-connector-python
+   ```
+
+### Common Runtime Issues
+
+1. **MySQL connection failed**
+   - Verify MySQL is running: `service mysql status`
+   - Check socket path: `ls -la /var/run/mysqld/mysqld.sock`
+   - Start MySQL: `service mysql start`
+
+2. **Benchmark runs instantly with 0 iterations or MAXINT values**
+   - Check if sysbench supports `--warmup-time` (some versions don't)
+   - Verify tables/data exist: `mysql -uroot -ppassword -e "SELECT COUNT(*) FROM sbrw.sbtest1;"`
+   - Check for existing history file with max iterations already reached
+
+3. **`IndexError: list index out of range` in `get_incumbents()`**
+   - All benchmark iterations failed
+   - Check MySQL logs: `tail -50 /var/log/mysql/error.log`
+   - Delete corrupted history file: `rm repo/history_<task_id>.json`
+
+4. **`psutil.AccessDenied` for MySQL process**
+   - Non-fatal warning (resource monitoring issue)
+   - MySQL process running as different user
+   - The optimization will still work
+
+5. **Knobs not being applied in online mode**
+   - Some knobs require MySQL restart (static variables)
+   - Use `online_mode = False` for full knob support
+   - Or use dynamic-only knob configs (`mysql_dynamic_10.json`, `mysql_cpu_io_dynamic_15.json`)
+
+6. **History file already exists with max iterations**
+   - Delete or rename: `rm repo/history_<task_id>.json`
+   - Or increase `max_runs` in config file
+
+### Logs
+
+Check logs in:
+- `logs/` directory
+- `log/tune_database_<timestamp>.log`
+- MySQL error log: `/var/log/mysql/error.log`
+
+### Verifying Your Setup
+
+Run this quick test to verify everything is working:
+
+```bash
+# Test MySQL connection
+mysql -uroot -ppassword -e "SELECT 1;"
+
+# Test sysbench
+sysbench oltp_read_write \
+    --mysql-host=localhost \
+    --mysql-user=root \
+    --mysql-password=password \
+    --mysql-db=sbrw \
+    --mysql-socket=$MYSQL_SOCK \
+    --tables=1 \
+    --table-size=1000 \
+    --time=5 \
+    run
+
+# Test OpAdviser setup
+cd /root/OpAdviser
 export PYTHONPATH="."
-python scripts/optimize.py --dbname=tpcc --workload=oltpbench_tpcc --softmax_weight --transformer
-python scripts/optimize.py --dbname=tpcc --workload=oltpbench_tpcc
-```
-### YCSB
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
-
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd /workspaces/OpAdviserPrivate
-mysql -ppassword -e"drop database ycsb;"
-mysql -ppassword -e"create database ycsb;"
-/oltpbench/oltpbenchmark -b ycsb -c /oltpbench/config/sample_ycsb_config.xml  --create=true --load=true --verbose
-export PYTHONPATH="."
-python scripts/optimize.py --dbname=ycsb --workload=oltpbench_ycsb --softmax_weight --transformer
-python scripts/optimize.py --dbname=ycsb --workload=oltpbench_ycsb
-```
-### TATP
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
-
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd /workspaces/OpAdviserPrivate
-mysql -ppassword -e"drop database tatp;"
-mysql -ppassword -e"create database tatp;"
-/oltpbench/oltpbenchmark -b tatp -c /oltpbench/config/sample_tatp_config.xml  --create=true --load=true --verbose
-export PYTHONPATH="."
-python scripts/optimize.py --dbname=tatp --workload=oltpbench_tatp --softmax_weight --transformer
-python scripts/optimize.py --dbname=tatp --workload=oltpbench_tatp
-```
-### Voter
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
-
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd /workspaces/OpAdviserPrivate
-mysql -ppassword -e"drop database voter;"
-mysql -ppassword -e"create database voter;"
-/oltpbench/oltpbenchmark -b voter -c /oltpbench/config/sample_voter_config.xml  --create=true --load=true --verbose
-export PYTHONPATH="."
-python scripts/optimize.py --dbname=voter --workload=oltpbench_voter --softmax_weight --transformer
-python scripts/optimize.py --dbname=voter --workload=oltpbench_voter
-```
-### TPC-H
-```shell
-cd /
-rm -rf queries-tpch-dbgen-mysql 
-git clone https://github.com/seokjeongeum/queries-tpch-dbgen-mysql.git
-cd queries-tpch-dbgen-mysql 
-apt install unzip
-unzip TPC-H\ V3.0.1.zip
-cd dbgen 
-make
-./dbgen -s 10
-mysql -ppassword -e"DROP DATABASE tpch;"
-mysql -ppassword -e"CREATE DATABASE tpch;"
-mysql -ppassword -e"
-USE tpch;
-
-CREATE TABLE NATION  ( N_NATIONKEY  INTEGER NOT NULL,
-                            N_NAME       CHAR(25) NOT NULL,
-                            N_REGIONKEY  INTEGER NOT NULL,
-                            N_COMMENT    VARCHAR(152));
-
-CREATE TABLE REGION  ( R_REGIONKEY  INTEGER NOT NULL,
-                            R_NAME       CHAR(25) NOT NULL,
-                            R_COMMENT    VARCHAR(152));
-
-CREATE TABLE PART  ( P_PARTKEY     INTEGER NOT NULL,
-                          P_NAME        VARCHAR(55) NOT NULL,
-                          P_MFGR        CHAR(25) NOT NULL,
-                          P_BRAND       CHAR(10) NOT NULL,
-                          P_TYPE        VARCHAR(25) NOT NULL,
-                          P_SIZE        INTEGER NOT NULL,
-                          P_CONTAINER   CHAR(10) NOT NULL,
-                          P_RETAILPRICE DECIMAL(15,2) NOT NULL,
-                          P_COMMENT     VARCHAR(23) NOT NULL );
-
-CREATE TABLE SUPPLIER ( S_SUPPKEY     INTEGER NOT NULL,
-                             S_NAME        CHAR(25) NOT NULL,
-                             S_ADDRESS     VARCHAR(40) NOT NULL,
-                             S_NATIONKEY   INTEGER NOT NULL,
-                             S_PHONE       CHAR(15) NOT NULL,
-                             S_ACCTBAL     DECIMAL(15,2) NOT NULL,
-                             S_COMMENT     VARCHAR(101) NOT NULL);
-
-CREATE TABLE PARTSUPP ( PS_PARTKEY     INTEGER NOT NULL,
-                             PS_SUPPKEY     INTEGER NOT NULL,
-                             PS_AVAILQTY    INTEGER NOT NULL,
-                             PS_SUPPLYCOST  DECIMAL(15,2)  NOT NULL,
-                             PS_COMMENT     VARCHAR(199) NOT NULL );
-
-CREATE TABLE CUSTOMER ( C_CUSTKEY     INTEGER NOT NULL,
-                             C_NAME        VARCHAR(25) NOT NULL,
-                             C_ADDRESS     VARCHAR(40) NOT NULL,
-                             C_NATIONKEY   INTEGER NOT NULL,
-                             C_PHONE       CHAR(15) NOT NULL,
-                             C_ACCTBAL     DECIMAL(15,2)   NOT NULL,
-                             C_MKTSEGMENT  CHAR(10) NOT NULL,
-                             C_COMMENT     VARCHAR(117) NOT NULL);
-
-CREATE TABLE ORDERS  ( O_ORDERKEY       INTEGER NOT NULL,
-                           O_CUSTKEY        INTEGER NOT NULL,
-                           O_ORDERSTATUS    CHAR(1) NOT NULL,
-                           O_TOTALPRICE     DECIMAL(15,2) NOT NULL,
-                           O_ORDERDATE      DATE NOT NULL,
-                           O_ORDERPRIORITY  CHAR(15) NOT NULL,
-                           O_CLERK          CHAR(15) NOT NULL,
-                           O_SHIPPRIORITY   INTEGER NOT NULL,
-                           O_COMMENT        VARCHAR(79) NOT NULL);
-
-CREATE TABLE LINEITEM ( L_ORDERKEY    INTEGER NOT NULL,
-                             L_PARTKEY     INTEGER NOT NULL,
-                             L_SUPPKEY     INTEGER NOT NULL,
-                             L_LINENUMBER  INTEGER NOT NULL,
-                             L_QUANTITY    DECIMAL(15,2) NOT NULL,
-                             L_EXTENDEDPRICE  DECIMAL(15,2) NOT NULL,
-                             L_DISCOUNT    DECIMAL(15,2) NOT NULL,
-                             L_TAX         DECIMAL(15,2) NOT NULL,
-                             L_RETURNFLAG  CHAR(1) NOT NULL,
-                             L_LINESTATUS  CHAR(1) NOT NULL,
-                             L_SHIPDATE    DATE NOT NULL,
-                             L_COMMITDATE  DATE NOT NULL,
-                             L_RECEIPTDATE DATE NOT NULL,
-                             L_SHIPINSTRUCT CHAR(25) NOT NULL,
-                             L_SHIPMODE     CHAR(10) NOT NULL,
-                             L_COMMENT      VARCHAR(44) NOT NULL);
-
-LOAD DATA LOCAL INFILE 'customer.tbl' INTO TABLE CUSTOMER FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'orders.tbl' INTO TABLE ORDERS FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'lineitem.tbl' INTO TABLE LINEITEM FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'nation.tbl' INTO TABLE NATION FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'partsupp.tbl' INTO TABLE PARTSUPP FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'part.tbl' INTO TABLE PART FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'region.tbl' INTO TABLE REGION FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'supplier.tbl' INTO TABLE SUPPLIER FIELDS TERMINATED BY '|';
-
-ALTER TABLE REGION
-ADD PRIMARY KEY (R_REGIONKEY);
-ALTER TABLE NATION
-ADD PRIMARY KEY (N_NATIONKEY);
-ALTER TABLE NATION
-ADD FOREIGN KEY NATION_FK1 (N_REGIONKEY) references REGION(R_REGIONKEY);
-ALTER TABLE PART
-ADD PRIMARY KEY (P_PARTKEY);
-ALTER TABLE SUPPLIER
-ADD PRIMARY KEY (S_SUPPKEY);
-ALTER TABLE SUPPLIER
-ADD FOREIGN KEY SUPPLIER_FK1 (S_NATIONKEY) references NATION(N_NATIONKEY);
-ALTER TABLE PARTSUPP
-ADD PRIMARY KEY (PS_PARTKEY,PS_SUPPKEY);
-ALTER TABLE CUSTOMER
-ADD PRIMARY KEY (C_CUSTKEY);
-ALTER TABLE CUSTOMER
-ADD FOREIGN KEY CUSTOMER_FK1 (C_NATIONKEY) references NATION(N_NATIONKEY);
-ALTER TABLE LINEITEM
-ADD PRIMARY KEY (L_ORDERKEY,L_LINENUMBER);
-ALTER TABLE PARTSUPP
-ADD FOREIGN KEY PARTSUPP_FK1 (PS_SUPPKEY) references SUPPLIER(S_SUPPKEY);
-ALTER TABLE PARTSUPP
-ADD FOREIGN KEY PARTSUPP_FK2 (PS_PARTKEY) references PART(P_PARTKEY);
-ALTER TABLE ORDERS
-ADD FOREIGN KEY ORDERS_FK1 (O_CUSTKEY) references CUSTOMER(C_CUSTKEY);
-ALTER TABLE LINEITEM
-ADD FOREIGN KEY LINEITEM_FK1 (L_ORDERKEY)  references ORDERS(O_ORDERKEY);
-ALTER TABLE LINEITEM
-ADD FOREIGN KEY LINEITEM_FK2 (L_PARTKEY,L_SUPPKEY) references PARTSUPP(PS_PARTKEY, PS_SUPPKEY);
+python -c "
+from autotune.database.mysqldb import MysqlDB
+from autotune.utils.config import parse_args
+args_db, _ = parse_args('scripts/config_ground_truth_ultrafast.ini')
+db = MysqlDB(args_db)
+print(f'MySQL PID: {db.pid}')
+print('Setup OK!')
 "
-cd /workspaces/OpAdviserPrivate
-export PYTHONPATH="."
-python scripts/optimize.py --dbname=tpch --workload=tpch --softmax_weight --transformer
-python scripts/optimize.py --dbname=tpch --workload=tpch
 ```
-## Find ground truth
-```shell
-cd /
-rm -rf sysbench
-git clone https://github.com/akopytov/sysbench.git && \
-    cd sysbench && \
-    git checkout ead2689ac6f61c5e7ba7c6e19198b86bd3a51d3c && \
-    ./autogen.sh && \
-    ./configure && \
-    make && make install
-mysql -ppassword -e"drop database sbrw;"
-mysql -ppassword -e"create database sbrw;"
-sysbench  \
-    --db-driver=mysql  \
-    --mysql-host=localhost  \
-    --mysql-port=3306  \
-    --mysql-user=root  \
-    --mysql-password=password  \
-    --table_size=800000  \
-    --tables=300  \
-    --events=0  \
-    --threads=80  \
-    --mysql-db=sbrw  \
-    oltp_read_write  \
-    prepare
-cd ~/OpAdviserPrivate
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/sysbench_rw.ini
-python scripts/optimize.py --config=scripts/sysbench_rw_ground_truth.ini
-```
-```shell
-cd /
-rm -rf sysbench
-git clone https://github.com/akopytov/sysbench.git && \
-    cd sysbench && \
-    git checkout ead2689ac6f61c5e7ba7c6e19198b86bd3a51d3c && \
-    ./autogen.sh && \
-    ./configure && \
-    make && make install
-mysql -ppassword -e"drop database sbwrite;"
-mysql -ppassword -e"create database sbwrite;"
-sysbench  \
-    --db-driver=mysql  \
-    --mysql-host=localhost  \
-    --mysql-port=3306  \
-    --mysql-user=root  \
-    --mysql-password=password  \
-    --table_size=800000  \
-    --tables=300  \
-    --events=0  \
-    --threads=80  \
-    --mysql-db=sbwrite  \
-    oltp_write_only  \
-    prepare
-cd ~/OpAdviserPrivate
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/sysbench_wo.ini
-python scripts/optimize.py --config=scripts/sysbench_wo_ground_truth.ini
-```
-```shell
-cd /
-rm -rf sysbench
-git clone https://github.com/akopytov/sysbench.git && \
-    cd sysbench && \
-    git checkout ead2689ac6f61c5e7ba7c6e19198b86bd3a51d3c && \
-    ./autogen.sh && \
-    ./configure && \
-    make && make install
-mysql -ppassword -e"drop database sbread;"
-mysql -ppassword -e"create database sbread;"
-sysbench  \
-    --db-driver=mysql  \
-    --mysql-host=localhost  \
-    --mysql-port=3306  \
-    --mysql-user=root  \
-    --mysql-password=password  \
-    --table_size=800000  \
-    --tables=300  \
-    --events=0  \
-    --threads=80  \
-    --mysql-db=sbread  \
-    oltp_read_only  \
-    prepare
-cd ~/OpAdviserPrivate
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/sysbench_ro.ini
-python scripts/optimize.py --config=scripts/sysbench_ro_ground_truth.ini
-```
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
 
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd ~/OpAdviserPrivate
-mysql -ppassword -e"drop database twitter;"
-mysql -ppassword -e"create database twitter;"
-/oltpbench/oltpbenchmark -b twitter -c /oltpbench/config/sample_twitter_config.xml  --create=true --load=true --verbose
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/twitter.ini
-python scripts/optimize.py --config=scripts/twitter_ground_truth.ini
-```
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
+---
 
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd ~/OpAdviserPrivate
-mysql -ppassword -e"drop database tpcc;"
-mysql -ppassword -e"create database tpcc;"
-/oltpbench/oltpbenchmark -b tpcc -c /oltpbench/config/sample_tpcc_config.xml  --create=true --load=true --verbose
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/tpcc.ini
-python scripts/optimize.py --config=scripts/tpcc_ground_truth.ini
-```
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
+## Citation
 
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd ~/OpAdviserPrivate
-mysql -ppassword -e"drop database ycsb;"
-mysql -ppassword -e"create database ycsb;"
-/oltpbench/oltpbenchmark -b ycsb -c /oltpbench/config/sample_ycsb_config.xml  --create=true --load=true --verbose
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/ycsb.ini
-python scripts/optimize.py --config=scripts/ycsb_ground_truth.ini
-```
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
+If you use OpAdviser in your research, please cite the relevant papers.
 
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd ~/OpAdviserPrivate
-mysql -ppassword -e"drop database wikipedia;"
-mysql -ppassword -e"create database wikipedia;"
-/oltpbench/oltpbenchmark -b wikipedia -c /oltpbench/config/sample_wikipedia_config.xml  --create=true --load=true --verbose
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/wikipedia.ini
-python scripts/optimize.py --config=scripts/wikipedia_ground_truth.ini
-```
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
+---
 
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd ~/OpAdviserPrivate
-mysql -ppassword -e"drop database tatp;"
-mysql -ppassword -e"create database tatp;"
-/oltpbench/oltpbenchmark -b tatp -c /oltpbench/config/sample_tatp_config.xml  --create=true --load=true --verbose
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/tatp.ini
-python scripts/optimize.py --config=scripts/tatp_ground_truth.ini
-```
-```shell
-cd /
-rm -rf oltpbench && \
-  git clone https://github.com/seokjeongeum/oltpbench.git
+## License
 
-cd /oltpbench && \
-    ant bootstrap && \
-    ant resolve && \
-    ant build && \
-    chmod 777 /oltpbench/*
-cd ~/OpAdviserPrivate
-mysql -ppassword -e"drop database voter;"
-mysql -ppassword -e"create database voter;"
-/oltpbench/oltpbenchmark -b voter -c /oltpbench/config/sample_voter_config.xml  --create=true --load=true --verbose
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/voter.ini
-python scripts/optimize.py --config=scripts/voter_ground_truth.ini
-```
-```shell
-cd ~/OpAdviserPrivate
-rm -rf queries-tpch-dbgen-mysql 
-git clone https://github.com/seokjeongeum/queries-tpch-dbgen-mysql.git
-cd queries-tpch-dbgen-mysql 
-apt install unzip
-unzip TPC-H\ V3.0.1.zip
-cd dbgen 
-make
-./dbgen -s 10
-mysql -ppassword -e"DROP DATABASE tpch;"
-mysql -ppassword -e"CREATE DATABASE tpch;"
-mysql -ppassword -e"
-USE tpch;
-
-CREATE TABLE NATION  ( N_NATIONKEY  INTEGER NOT NULL,
-                            N_NAME       CHAR(25) NOT NULL,
-                            N_REGIONKEY  INTEGER NOT NULL,
-                            N_COMMENT    VARCHAR(152));
-
-CREATE TABLE REGION  ( R_REGIONKEY  INTEGER NOT NULL,
-                            R_NAME       CHAR(25) NOT NULL,
-                            R_COMMENT    VARCHAR(152));
-
-CREATE TABLE PART  ( P_PARTKEY     INTEGER NOT NULL,
-                          P_NAME        VARCHAR(55) NOT NULL,
-                          P_MFGR        CHAR(25) NOT NULL,
-                          P_BRAND       CHAR(10) NOT NULL,
-                          P_TYPE        VARCHAR(25) NOT NULL,
-                          P_SIZE        INTEGER NOT NULL,
-                          P_CONTAINER   CHAR(10) NOT NULL,
-                          P_RETAILPRICE DECIMAL(15,2) NOT NULL,
-                          P_COMMENT     VARCHAR(23) NOT NULL );
-
-CREATE TABLE SUPPLIER ( S_SUPPKEY     INTEGER NOT NULL,
-                             S_NAME        CHAR(25) NOT NULL,
-                             S_ADDRESS     VARCHAR(40) NOT NULL,
-                             S_NATIONKEY   INTEGER NOT NULL,
-                             S_PHONE       CHAR(15) NOT NULL,
-                             S_ACCTBAL     DECIMAL(15,2) NOT NULL,
-                             S_COMMENT     VARCHAR(101) NOT NULL);
-
-CREATE TABLE PARTSUPP ( PS_PARTKEY     INTEGER NOT NULL,
-                             PS_SUPPKEY     INTEGER NOT NULL,
-                             PS_AVAILQTY    INTEGER NOT NULL,
-                             PS_SUPPLYCOST  DECIMAL(15,2)  NOT NULL,
-                             PS_COMMENT     VARCHAR(199) NOT NULL );
-
-CREATE TABLE CUSTOMER ( C_CUSTKEY     INTEGER NOT NULL,
-                             C_NAME        VARCHAR(25) NOT NULL,
-                             C_ADDRESS     VARCHAR(40) NOT NULL,
-                             C_NATIONKEY   INTEGER NOT NULL,
-                             C_PHONE       CHAR(15) NOT NULL,
-                             C_ACCTBAL     DECIMAL(15,2)   NOT NULL,
-                             C_MKTSEGMENT  CHAR(10) NOT NULL,
-                             C_COMMENT     VARCHAR(117) NOT NULL);
-
-CREATE TABLE ORDERS  ( O_ORDERKEY       INTEGER NOT NULL,
-                           O_CUSTKEY        INTEGER NOT NULL,
-                           O_ORDERSTATUS    CHAR(1) NOT NULL,
-                           O_TOTALPRICE     DECIMAL(15,2) NOT NULL,
-                           O_ORDERDATE      DATE NOT NULL,
-                           O_ORDERPRIORITY  CHAR(15) NOT NULL,
-                           O_CLERK          CHAR(15) NOT NULL,
-                           O_SHIPPRIORITY   INTEGER NOT NULL,
-                           O_COMMENT        VARCHAR(79) NOT NULL);
-
-CREATE TABLE LINEITEM ( L_ORDERKEY    INTEGER NOT NULL,
-                             L_PARTKEY     INTEGER NOT NULL,
-                             L_SUPPKEY     INTEGER NOT NULL,
-                             L_LINENUMBER  INTEGER NOT NULL,
-                             L_QUANTITY    DECIMAL(15,2) NOT NULL,
-                             L_EXTENDEDPRICE  DECIMAL(15,2) NOT NULL,
-                             L_DISCOUNT    DECIMAL(15,2) NOT NULL,
-                             L_TAX         DECIMAL(15,2) NOT NULL,
-                             L_RETURNFLAG  CHAR(1) NOT NULL,
-                             L_LINESTATUS  CHAR(1) NOT NULL,
-                             L_SHIPDATE    DATE NOT NULL,
-                             L_COMMITDATE  DATE NOT NULL,
-                             L_RECEIPTDATE DATE NOT NULL,
-                             L_SHIPINSTRUCT CHAR(25) NOT NULL,
-                             L_SHIPMODE     CHAR(10) NOT NULL,
-                             L_COMMENT      VARCHAR(44) NOT NULL);
-
-LOAD DATA LOCAL INFILE 'customer.tbl' INTO TABLE CUSTOMER FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'orders.tbl' INTO TABLE ORDERS FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'lineitem.tbl' INTO TABLE LINEITEM FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'nation.tbl' INTO TABLE NATION FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'partsupp.tbl' INTO TABLE PARTSUPP FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'part.tbl' INTO TABLE PART FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'region.tbl' INTO TABLE REGION FIELDS TERMINATED BY '|';
-LOAD DATA LOCAL INFILE 'supplier.tbl' INTO TABLE SUPPLIER FIELDS TERMINATED BY '|';
-
-ALTER TABLE REGION
-ADD PRIMARY KEY (R_REGIONKEY);
-ALTER TABLE NATION
-ADD PRIMARY KEY (N_NATIONKEY);
-ALTER TABLE NATION
-ADD FOREIGN KEY NATION_FK1 (N_REGIONKEY) references REGION(R_REGIONKEY);
-ALTER TABLE PART
-ADD PRIMARY KEY (P_PARTKEY);
-ALTER TABLE SUPPLIER
-ADD PRIMARY KEY (S_SUPPKEY);
-ALTER TABLE SUPPLIER
-ADD FOREIGN KEY SUPPLIER_FK1 (S_NATIONKEY) references NATION(N_NATIONKEY);
-ALTER TABLE PARTSUPP
-ADD PRIMARY KEY (PS_PARTKEY,PS_SUPPKEY);
-ALTER TABLE CUSTOMER
-ADD PRIMARY KEY (C_CUSTKEY);
-ALTER TABLE CUSTOMER
-ADD FOREIGN KEY CUSTOMER_FK1 (C_NATIONKEY) references NATION(N_NATIONKEY);
-ALTER TABLE LINEITEM
-ADD PRIMARY KEY (L_ORDERKEY,L_LINENUMBER);
-ALTER TABLE PARTSUPP
-ADD FOREIGN KEY PARTSUPP_FK1 (PS_SUPPKEY) references SUPPLIER(S_SUPPKEY);
-ALTER TABLE PARTSUPP
-ADD FOREIGN KEY PARTSUPP_FK2 (PS_PARTKEY) references PART(P_PARTKEY);
-ALTER TABLE ORDERS
-ADD FOREIGN KEY ORDERS_FK1 (O_CUSTKEY) references CUSTOMER(C_CUSTKEY);
-ALTER TABLE LINEITEM
-ADD FOREIGN KEY LINEITEM_FK1 (L_ORDERKEY)  references ORDERS(O_ORDERKEY);
-ALTER TABLE LINEITEM
-ADD FOREIGN KEY LINEITEM_FK2 (L_PARTKEY,L_SUPPKEY) references PARTSUPP(PS_PARTKEY, PS_SUPPKEY);
-"
-cd ~/OpAdviserPrivate
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/tpch.ini
-python scripts/optimize.py --config=scripts/tpch_ground_truth.ini
-```
-```shell
-chmod +x ./job.sh
-./job.sh
-export PYTHONPATH="."
-python scripts/optimize.py --config=scripts/job.ini
-python scripts/optimize.py --config=scripts/job_ground_truth.ini
-```
+MIT License - See [LICENSE](LICENSE) file.

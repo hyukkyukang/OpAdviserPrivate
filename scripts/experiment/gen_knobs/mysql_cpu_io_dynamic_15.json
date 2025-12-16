@@ -1,0 +1,108 @@
+{
+    "innodb_io_capacity": {
+        "type": "integer",
+        "default": 200,
+        "min": 100,
+        "max": 200000,
+        "description": "Background I/O operations per second"
+    },
+    "innodb_io_capacity_max": {
+        "type": "integer",
+        "default": 2000,
+        "min": 100,
+        "max": 400000,
+        "description": "Maximum I/O capacity for flushing"
+    },
+    "innodb_thread_concurrency": {
+        "type": "integer",
+        "default": 0,
+        "min": 0,
+        "max": 1000,
+        "description": "Max concurrent threads in InnoDB (0=unlimited)"
+    },
+    "thread_cache_size": {
+        "type": "integer",
+        "default": 9,
+        "min": 0,
+        "max": 16384,
+        "description": "Number of threads to cache for reuse"
+    },
+    "innodb_spin_wait_delay": {
+        "type": "integer",
+        "default": 6,
+        "min": 0,
+        "max": 6000,
+        "description": "Spin lock wait delay in microseconds"
+    },
+    "innodb_sync_spin_loops": {
+        "type": "integer",
+        "default": 30,
+        "min": 0,
+        "max": 30000,
+        "description": "Number of spin loops before thread sleeps"
+    },
+    "innodb_max_dirty_pages_pct": {
+        "type": "integer",
+        "default": 90,
+        "min": 0,
+        "max": 99,
+        "description": "Maximum percentage of dirty pages in buffer pool"
+    },
+    "innodb_max_dirty_pages_pct_lwm": {
+        "type": "integer",
+        "default": 10,
+        "min": 0,
+        "max": 99,
+        "description": "Low water mark for dirty page percentage"
+    },
+    "innodb_flushing_avg_loops": {
+        "type": "integer",
+        "default": 30,
+        "min": 1,
+        "max": 1000,
+        "description": "Number of iterations for flushing average calculation"
+    },
+    "innodb_lru_scan_depth": {
+        "type": "integer",
+        "default": 1024,
+        "min": 100,
+        "max": 10240,
+        "description": "How deep to scan LRU list for dirty pages"
+    },
+    "table_open_cache": {
+        "type": "integer",
+        "default": 4000,
+        "min": 1,
+        "max": 100000,
+        "description": "Number of open tables to cache"
+    },
+    "innodb_old_blocks_time": {
+        "type": "integer",
+        "default": 1000,
+        "min": 0,
+        "max": 4294967295,
+        "description": "Time in ms before old blocks can be moved to new"
+    },
+    "sort_buffer_size": {
+        "type": "integer",
+        "default": 262144,
+        "min": 32768,
+        "max": 134217728,
+        "description": "Buffer size for sorting operations"
+    },
+    "read_buffer_size": {
+        "type": "integer",
+        "default": 131072,
+        "min": 8192,
+        "max": 2147483647,
+        "description": "Buffer size for sequential table scans"
+    },
+    "join_buffer_size": {
+        "type": "integer",
+        "default": 262144,
+        "min": 128,
+        "max": 4294967295,
+        "description": "Buffer size for join operations"
+    }
+}
+

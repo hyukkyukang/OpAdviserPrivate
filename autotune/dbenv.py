@@ -181,13 +181,16 @@ class DBEnv:
                 exe_file =  '/cli/run_sysbench_postgresql.sh'
             else:
                 exe_file = '/cli/run_sysbench.sh'
+            # Use configurable table count and size, with ultrafast defaults
+            tables = getattr(self, 'sysbench_tables', 20)  # Default 20 for ultrafast
+            table_size = getattr(self, 'sysbench_table_size', 50000)  # Default 50000 for ultrafast
             cmd = self.workload['cmd'].format(dirname + exe_file,
                                               self.workload['type'],
                                               self.db.host,
                                               self.db.port,
                                               self.db.user,
-                                              150,
-                                              800000,
+                                              tables,
+                                              table_size,
                                               BENCHMARK_WARMING_TIME,
                                               self.threads,
                                               BENCHMARK_RUNNING_TIME,
@@ -462,5 +465,8 @@ class DBEnv:
             constraints = self.get_constraints(res)
             return objs, constraints, external_metrics, resource, list(internal_metrics), self.info, trial_state
 
-        except:
+        except Exception as e:
+            import traceback
+            logger.error(f"step() failed with error: {e}")
+            logger.error(traceback.format_exc())
             return None, None, {}, {}, [], self.info, FAILED

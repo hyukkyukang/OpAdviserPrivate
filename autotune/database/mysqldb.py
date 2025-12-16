@@ -76,6 +76,34 @@ class MysqlDB:
 
         self.clear_cmd = """mysqladmin processlist -uroot -S$MYSQL_SOCK | awk '$2 ~ /^[0-9]/ {print "KILL "$2";"}' | mysql -uroot -S$MYSQL_SOCK """
 
+        # If pid is 0 (not manually set), try to get the actual MySQL PID
+        if self.pid == 0:
+            self.pid = self._get_mysqld_pid()
+
+    def _get_mysqld_pid(self) -> int:
+        """Get the PID of the running mysqld process."""
+        import subprocess
+        try:
+            # Try pgrep first
+            result = subprocess.run(['pgrep', '-x', 'mysqld'], capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                return int(result.stdout.strip().split()[0])
+            # Fallback: read from MySQL pid file
+            pid_file_locations = [
+                '/var/run/mysqld/mysqld.pid',
+                '/var/lib/mysql/*.pid',
+                '/tmp/mysqld.pid'
+            ]
+            import glob
+            for pattern in pid_file_locations:
+                for pid_file in glob.glob(pattern):
+                    if os.path.exists(pid_file):
+                        with open(pid_file, 'r') as f:
+                            return int(f.read().strip())
+        except Exception as e:
+            logger.warning(f"Failed to get MySQL PID: {e}")
+        return 0
+
     def _gen_config_file(self, knobs):
         if self.remote_mode:
             cnf = '/tmp/mylocal.cnf'
@@ -397,9 +425,9 @@ class MysqlDB:
             else:
                 return float(sum(metric_values)) / len(metric_values)
 
-        result = np.zeros(65)
         keys = list(metrics[0].keys())
         keys.sort()
+        result = np.zeros(max(len(keys), self.num_metrics))
         total_pages = 0
         dirty_pages = 0
         request = 0

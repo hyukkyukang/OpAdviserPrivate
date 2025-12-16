@@ -13,3 +13,4 @@ autotune.egg-info
 build/lib/autotune
 results
 /ddpg/model_params/
+/logs/

@@ -29,11 +29,21 @@ if __name__ == '__main__':
     # args_db, args_tune = parse_args(opt.config,opt.knob_config_file)
     # args_db['knob_config_file']=opt.knob_config_file
     # args_db['knob_num']=opt.knob_num
-    args_db['dbname'] = opt.dbname
-    args_db['workload'] = opt.workload
-    args_db['oltpbench_config_xml'] = f'/oltpbench/config/sample_{opt.dbname}_config.xml'
-    args_db['workload_type'] = opt.workload_type
-    args_tune['task_id'] = f"{opt.dbname}_ddpg_softmax_{opt.softmax_weight}_transformer_{opt.transformer}"
+    
+    # Only override if CLI args differ from defaults (allow config file values to be used)
+    if opt.dbname != 'wikipedia':  # CLI arg was explicitly provided
+        args_db['dbname'] = opt.dbname
+    if opt.workload != 'oltpbench_wikipedia':  # CLI arg was explicitly provided
+        args_db['workload'] = opt.workload
+    if opt.workload_type != 'read':  # CLI arg was explicitly provided
+        args_db['workload_type'] = opt.workload_type
+    
+    # Set oltpbench_config_xml based on final dbname
+    args_db['oltpbench_config_xml'] = f'/oltpbench/config/sample_{args_db["dbname"]}_config.xml'
+    
+    # Only override task_id if softmax_weight or transformer flags are set
+    if opt.softmax_weight or opt.transformer:
+        args_tune['task_id'] = f"{args_db['dbname']}_ddpg_softmax_{opt.softmax_weight}_transformer_{opt.transformer}"
     # args_tune['optimize_method'] = opt.optimize_method
     # args_tune['initial_tunable_knob_num']=opt.knob_num
     #2024-12-27 softmax transformer

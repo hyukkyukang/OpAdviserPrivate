@@ -167,12 +167,17 @@ class DBTuner:
         return history_workload_data
 
     def tune(self):
+        # Parse runtime_limit from config (None means no time limit)
+        runtime_limit_raw = self.args_tune.get('runtime_limit', None)
+        runtime_limit: int | None = int(runtime_limit_raw) if runtime_limit_raw not in (None, '', 'None') else None
+
         bo = PipleLine(self.env.step,
                        self.config_space,
                        num_objs=len(self.objs),
                        num_constraints=len(self.constraints),
                        optimizer_type=self.method,
                        max_runs=int(self.args_tune['max_runs']),
+                       runtime_limit=runtime_limit,  # Time budget in seconds
                        surrogate_type=self.surrogate_type,
                        history_bo_data=self.hcL,
                        acq_optimizer_type=self.acq_optimizer_type,  # 'random_scipy',#
