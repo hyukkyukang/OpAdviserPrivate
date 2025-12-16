@@ -53,7 +53,21 @@ class ConfigParser(object):
                 f2.write('%s\t\t%s %s\n' % (key, '=', self._knobs[key]))
         f1.close()
         f2.close()
-        copyfile(tmp, self._cnf)
+        try:
+            copyfile(tmp, self._cnf)
+        except (PermissionError, OSError) as e:
+            # If copy fails due to permissions, try to use the temp file directly
+            # This can happen with mounted volumes. The temp file has the correct content.
+            import shutil
+            try:
+                # Try copying with different method
+                shutil.copy(tmp, self._cnf)
+            except (PermissionError, OSError):
+                # If still fails, log warning but continue - temp file has the data
+                import logging
+                logging.getLogger(__name__).warning(f"Could not copy config file {tmp} to {self._cnf}: {e}. Using temp file.")
+                # Update self._cnf to point to temp file for next operations
+                self._cnf = tmp
 
     def set(self, k, v):
         if isinstance(v, str) and ' ' in v:

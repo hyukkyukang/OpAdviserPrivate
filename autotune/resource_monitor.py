@@ -1,9 +1,12 @@
 import pdb
 import time
+import logging
 import psutil
 import subprocess
 import multiprocessing as mp
 from multiprocessing import Manager
+
+logger = logging.getLogger("autotune.resource_monitor")
 
 
 class ResourceMonitor:
@@ -72,17 +75,42 @@ class ResourceMonitor:
             count += 1
 
     def monitor_io_usage(self):
+        """
+        Monitor IO usage for the target process.
+        Handles AccessDenied exceptions gracefully when /proc/<pid>/io is not accessible.
+        """
         count = 0
+        io_access_denied = False
         while self.alive.value and count < self.ticks:
             if count < self.warmup:
                 time.sleep(self.interval)
                 count = count + 1
                 continue
-            sp1 = self.process.io_counters()
-            time.sleep(self.interval)
-            sp2 = self.process.io_counters()
-            self.io_read_seq.append((sp2[2]-sp1[2])/(1024.0 * 1024.0))
-            self.io_write_seq.append((sp2[3]-sp1[3])/(1024.0 * 1024.0))
+            
+            try:
+                sp1 = self.process.io_counters()
+                time.sleep(self.interval)
+                sp2 = self.process.io_counters()
+                self.io_read_seq.append((sp2[2]-sp1[2])/(1024.0 * 1024.0))
+                self.io_write_seq.append((sp2[3]-sp1[3])/(1024.0 * 1024.0))
+            except (psutil.AccessDenied, PermissionError) as e:
+                if not io_access_denied:
+                    logger.warning(
+                        f"Cannot access IO counters for PID {self.process.pid}: {e}. "
+                        f"IO metrics will be set to 0. This may occur in containers due to "
+                        f"PID namespace isolation or kernel restrictions."
+                    )
+                    io_access_denied = True
+                # Append zero values when IO counters are not accessible
+                self.io_read_seq.append(0.0)
+                self.io_write_seq.append(0.0)
+            except psutil.NoSuchProcess:
+                # Process has terminated
+                logger.warning(f"Process {self.process.pid} no longer exists")
+                self.io_read_seq.append(0.0)
+                self.io_write_seq.append(0.0)
+                break
+            
             count += 1
 
     def monitor_cpu_usage(self):

@@ -1,19 +1,19 @@
 #!/bin/bash
 # =============================================================================
-# OpAdviser Ultra-Fast Performance Evaluation Script
+# OpAdviser Ultra-Fast Time Evaluation Script
 # =============================================================================
-# This script runs database tuning and displays the TPS performance improvement.
+# This script runs database tuning and displays the time it took for tuning.
 #
 # Usage (via Docker):
 #   1. Start the container:
 #      docker compose up -d
 #
 #   2. Run the evaluation:
-#      docker exec -it Tuning.sh sh /root/Tuning/eval_performance.sh
+#      docker exec -it Tuning.sh sh /root/Tuning/eval_time.sh
 #
 # Or manually inside the container:
-#   sh /root/Tuning/eval_performance.sh
-#   sh /root/OpAdviser/eval_performance.sh
+#   sh /root/Tuning/eval_time.sh
+#   sh /root/OpAdviser/eval_time.sh
 # =============================================================================
 
 set -e
@@ -34,7 +34,7 @@ TABLE_SIZE=50000
 THREADS=40
 
 # Tuning settings
-MAX_RUNS=50          # Number of tuning iterations (reduce for faster demo)
+MAX_RUNS=10          # Number of tuning iterations (reduce for faster demo)
 WORKLOAD_TIME=30     # Benchmark duration per iteration (seconds)
 WARMUP_TIME=5        # Warmup time per iteration (seconds)
 
@@ -96,7 +96,7 @@ print_banner() {
     echo "║  ╚██████╔╝██║     ██║  ██║██████╔╝ ╚████╔╝ ██║███████║███████╗   ║"
     echo "║   ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═════╝   ╚═══╝  ╚═╝╚══════╝╚══════╝   ║"
     echo "║                                                                   ║"
-    echo "║           Ultra-Fast Performance Evaluation Script                ║"
+    echo "║              Ultra-Fast Time Evaluation Script                    ║"
     echo "╚═══════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -283,7 +283,7 @@ optimize_method = SMAC
 space_transfer = False
 auto_optimizer = False
 selector_type = shap
-initial_runs = 10
+initial_runs = 3
 initial_tunable_knob_num = 10
 incremental = none
 incremental_every = 10
@@ -319,6 +319,10 @@ run_tuning() {
     # Remove existing history file to start fresh
     rm -f "${HISTORY_FILE}"
     
+    # Record start time
+    TUNING_START_TIME=$(date +%s)
+    echo "${TUNING_START_TIME}" > /tmp/tuning_start_time.txt
+    
     # Run the optimization
     python scripts/optimize.py --config="${CONFIG_FILE}" 2>&1 | while IFS= read -r line; do
         # Print progress updates
@@ -333,11 +337,15 @@ run_tuning() {
         fi
     done
     
+    # Record end time
+    TUNING_END_TIME=$(date +%s)
+    echo "${TUNING_END_TIME}" > /tmp/tuning_end_time.txt
+    
     log_info "Tuning completed!"
 }
 
 # =============================================================================
-# Step 7: Analyze Results
+# Step 7: Analyze Results - Calculate Tuning Time
 # =============================================================================
 analyze_results() {
     log_step "Step 7: Analyzing results"
@@ -347,114 +355,156 @@ analyze_results() {
         exit 1
     fi
     
-    # Extract TPS values using Python
-    python3 << EOF
+    # Read start and end times
+    if [ -f "/tmp/tuning_start_time.txt" ] && [ -f "/tmp/tuning_end_time.txt" ]; then
+        TUNING_START_TIME=$(cat /tmp/tuning_start_time.txt)
+        TUNING_END_TIME=$(cat /tmp/tuning_end_time.txt)
+        TUNING_DURATION=$((TUNING_END_TIME - TUNING_START_TIME))
+    else
+        # Fallback: calculate from history file timestamps if available
+        TUNING_DURATION=$(python3 << PYEOF
 import json
 import sys
+from datetime import datetime
 
-# Load history
-with open("${HISTORY_FILE}", 'r') as f:
-    data = json.load(f)
+try:
+    with open("${HISTORY_FILE}", 'r') as f:
+        data = json.load(f)
+    
+    history = data.get('data', [])
+    if len(history) < 2:
+        print("0")
+        sys.exit(0)
+    
+    # Try to get timestamps from history entries
+    first_time = None
+    last_time = None
+    
+    for obs in history:
+        # Look for timestamp in various possible locations
+        timestamp = obs.get('timestamp') or obs.get('time') or obs.get('datetime')
+        if timestamp:
+            try:
+                if isinstance(timestamp, str):
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                else:
+                    dt = datetime.fromtimestamp(timestamp)
+                
+                if first_time is None or dt < first_time:
+                    first_time = dt
+                if last_time is None or dt > last_time:
+                    last_time = dt
+            except:
+                pass
+    
+    if first_time and last_time:
+        duration = int((last_time - first_time).total_seconds())
+        print(duration)
+    else:
+        print("0")
+except Exception as e:
+    print("0")
+PYEOF
+        )
+    fi
+    
+    # Calculate time breakdown
+    HOURS=$((TUNING_DURATION / 3600))
+    MINUTES=$(((TUNING_DURATION % 3600) / 60))
+    SECONDS=$((TUNING_DURATION % 60))
+    
+    # Get iteration count from history file
+    ITERATION_COUNT=$(python3 << PYEOF
+import json
+try:
+    with open("${HISTORY_FILE}", 'r') as f:
+        data = json.load(f)
+    history = data.get('data', [])
+    print(len(history))
+except:
+    print("0")
+PYEOF
+    )
+    
+    # Print results
+    echo ""
+    echo "================================================================================"
+    echo "                    TIME EVALUATION RESULTS"
+    echo "================================================================================"
+    echo ""
+    echo "📊 TUNING SUMMARY"
+    echo "--------------------------------------------------------------------------------"
+    echo "  Total iterations:     ${ITERATION_COUNT}"
+    echo "  Total tuning time:     ${TUNING_DURATION} seconds"
+    echo ""
+    echo "⏱️  TIME BREAKDOWN"
+    echo "--------------------------------------------------------------------------------"
+    if [ $HOURS -gt 0 ]; then
+        echo "  Total time:            ${HOURS}h ${MINUTES}m ${SECONDS}s"
+    elif [ $MINUTES -gt 0 ]; then
+        echo "  Total time:            ${MINUTES}m ${SECONDS}s"
+    else
+        echo "  Total time:            ${SECONDS}s"
+    fi
+    
+    if [ $ITERATION_COUNT -gt 0 ]; then
+        AVG_TIME_PER_ITER=$(python3 -c "print(f'{${TUNING_DURATION} / ${ITERATION_COUNT}:.2f}')")
+        echo "  Average per iteration: ${AVG_TIME_PER_ITER} seconds"
+    fi
+    echo ""
+    
+    # Calculate expected vs actual time
+    EXPECTED_TIME=$((MAX_RUNS * (WORKLOAD_TIME + WARMUP_TIME + 10)))
+    EFFICIENCY=$(python3 -c "print(f'{(${EXPECTED_TIME} / ${TUNING_DURATION}) * 100:.1f}')" 2>/dev/null || echo "N/A")
+    
+    echo "📈 TIME ANALYSIS"
+    echo "--------------------------------------------------------------------------------"
+    echo "  Expected time:          $((EXPECTED_TIME / 60)) minutes ($((EXPECTED_TIME / 3600))h $(((EXPECTED_TIME % 3600) / 60))m)"
+    echo "  Actual time:           $((TUNING_DURATION / 60)) minutes ($((TUNING_DURATION / 3600))h $(((TUNING_DURATION % 3600) / 60))m)"
+    if [ "$EFFICIENCY" != "N/A" ] && [ $TUNING_DURATION -gt 0 ]; then
+        echo "  Time efficiency:       ${EFFICIENCY}%"
+    fi
+    echo ""
+    echo "================================================================================"
+    
+    # Save summary for external use
+    if [ $ITERATION_COUNT -gt 0 ] && [ $TUNING_DURATION -gt 0 ]; then
+        AVG_TIME_VAL=$(python3 -c "print(f'{${TUNING_DURATION} / ${ITERATION_COUNT}:.2f}')")
+    else
+        AVG_TIME_VAL="0.00"
+    fi
+    
+    python3 << PYEOF
+import json
 
-history = data.get('data', [])
-
-if not history:
-    print("No tuning data found!")
-    sys.exit(1)
-
-# Extract TPS values
-tps_values = []
-for obs in history:
-    tps = obs.get('external_metrics', {}).get('tps', 0)
-    if tps > 0.1:  # Filter out failed runs
-        tps_values.append(tps)
-
-if not tps_values:
-    print("No valid TPS measurements found!")
-    sys.exit(1)
-
-# Calculate statistics
-default_tps = tps_values[0] if tps_values else 0
-best_tps = max(tps_values)
-worst_tps = min(tps_values)
-avg_tps = sum(tps_values) / len(tps_values)
-
-# Practical worst (exclude outliers below 10% of median)
-sorted_tps = sorted(tps_values)
-median_tps = sorted_tps[len(sorted_tps) // 2]
-threshold = median_tps * 0.1
-practical_tps = [t for t in tps_values if t >= threshold]
-practical_worst = min(practical_tps) if practical_tps else worst_tps
-
-# Calculate improvements
-best_vs_worst = best_tps / worst_tps if worst_tps > 0 else float('inf')
-best_vs_practical = best_tps / practical_worst if practical_worst > 0 else float('inf')
-
-# Find best iteration
-best_iter = tps_values.index(best_tps) + 1
-
-# Print results
-print("")
-print("=" * 70)
-print("               PERFORMANCE EVALUATION RESULTS")
-print("=" * 70)
-print("")
-print(f"📊 TUNING SUMMARY")
-print("-" * 70)
-print(f"  Total iterations:     {len(history)}")
-print(f"  Valid measurements:   {len(tps_values)}")
-print(f"  Best iteration:       #{best_iter}")
-print("")
-print(f"📈 TPS MEASUREMENTS")
-print("-" * 70)
-print(f"  Default (iter 1):     {default_tps:,.2f} TPS")
-print(f"  Worst TPS:            {worst_tps:,.2f} TPS")
-print(f"  Practical Worst:      {practical_worst:,.2f} TPS")
-print(f"  Best TPS:             {best_tps:,.2f} TPS")
-print(f"  Average TPS:          {avg_tps:,.2f} TPS")
-print("")
-print("=" * 70)
-print("        ⚡ PERFORMANCE IMPROVEMENT RATIOS ⚡")
-print("=" * 70)
-print("")
-print(f"  🔸 Best / Worst:           {best_vs_worst:,.2f}x")
-print(f"  🔸 Best / Practical Worst: {best_vs_practical:,.2f}x")
-print("")
-
-# Target check
-TARGET = 4.5
-max_improvement = max(best_vs_worst, best_vs_practical)
-print("-" * 70)
-print(f"  🎯 Target improvement:    {TARGET}x")
-print("")
-
-if max_improvement >= TARGET:
-    print(f"  ✅ SUCCESS! Maximum improvement: {max_improvement:.2f}x >= {TARGET}x")
-else:
-    print(f"  ⚠️  Below target: {max_improvement:.2f}x < {TARGET}x")
-
-print("")
-print("=" * 70)
-
-# Save summary for external use
 summary = {
-    "default_tps": default_tps,
-    "best_tps": best_tps,
-    "worst_tps": worst_tps,
-    "practical_worst_tps": practical_worst,
-    "best_vs_worst": best_vs_worst,
-    "best_vs_practical": best_vs_practical,
-    "best_iteration": best_iter,
-    "total_iterations": len(history)
+    "total_iterations": ${ITERATION_COUNT},
+    "total_time_seconds": ${TUNING_DURATION},
+    "total_time_hours": ${HOURS},
+    "total_time_minutes": ${MINUTES},
+    "total_time_seconds_remainder": ${SECONDS},
+    "average_time_per_iteration": float("${AVG_TIME_VAL}"),
+    "expected_time_seconds": ${EXPECTED_TIME},
+    "task_id": "${TASK_ID}"
 }
 
-with open("/tmp/eval_summary.json", 'w') as f:
+with open("/tmp/eval_time_summary.json", 'w') as f:
     json.dump(summary, f, indent=2)
 
 print(f"\nDetailed history saved to: ${HISTORY_FILE}")
-print(f"Summary saved to: /tmp/eval_summary.json")
+print(f"Time summary saved to: /tmp/eval_time_summary.json")
 print("")
-EOF
+PYEOF
+    
+    # Print total time in a simple format
+    echo ""
+    if [ $HOURS -gt 0 ]; then
+        echo "Total Time: ${HOURS}h ${MINUTES}m ${SECONDS}s"
+    elif [ $MINUTES -gt 0 ]; then
+        echo "Total Time: ${MINUTES}m ${SECONDS}s"
+    else
+        echo "Total Time: ${SECONDS}s"
+    fi
 }
 
 # =============================================================================
@@ -472,10 +522,10 @@ print_summary() {
     echo ""
     echo "Files generated:"
     echo "  - Tuning history: ${HISTORY_FILE}"
-    echo "  - Summary: /tmp/eval_summary.json"
+    echo "  - Time summary: /tmp/eval_time_summary.json"
     echo ""
     echo "To view detailed results:"
-    echo "  cat /tmp/eval_summary.json"
+    echo "  cat /tmp/eval_time_summary.json"
     echo ""
 }
 

@@ -164,6 +164,26 @@ class BenchEnv(DBEnv):
             self.reinit = False
         self.y_variable = y_variable
         self.lhs_log = lhs_log
+        
+        # Load resource prediction models if available
+        self.resource_models = None
+        resource_model_path = 'resource_models/resource_predictor.joblib'
+        if os.path.exists(resource_model_path):
+            try:
+                import joblib
+                resource_model_data = joblib.load(resource_model_path)
+                self.resource_models = {
+                    'model_cpu': resource_model_data['model_cpu'],
+                    'model_read_io': resource_model_data['model_read_io'],
+                    'model_write_io': resource_model_data['model_write_io'],
+                    'workload_encoder': resource_model_data.get('workload_encoder', {}),
+                    'types': resource_model_data.get('types'),
+                    'bounds': resource_model_data.get('bounds')
+                }
+                logger.info('[Resource Models] Loaded resource prediction models from {}'.format(resource_model_path))
+            except Exception as e:
+                logger.warning('[Resource Models] Failed to load resource models: {}'.format(e))
+                self.resource_models = None
 
     def generate_time(self):
         global BENCHMARK_RUNNING_TIME
@@ -304,7 +324,56 @@ class BenchEnv(DBEnv):
         y_variable = self.model.predict(np.array(x).reshape(1, -1))[0]
         external_metrics = [y_variable] * 6
         internal_metrics = [0] * 65
-        resource = [0] * 8
+        
+        # Predict resource metrics if models are available
+        if self.resource_models is not None:
+            try:
+                # Convert knobs to action space (normalized 0-1)
+                from autotune.knobs import knob2action
+                x_action = knob2action(knobs)
+                
+                # Encode workload features (simple encoding: workload type + threads)
+                workload_encoder = self.resource_models['workload_encoder']
+                unique_workloads = workload_encoder.get('unique_workloads', [])
+                n_workload_features = workload_encoder.get('n_features', 0)
+                
+                # Create workload features (default: sysbench, 40 threads)
+                workload_features = np.zeros((1, n_workload_features))
+                if len(unique_workloads) > 0:
+                    # Try to match workload type
+                    workload_name = getattr(self.workload, 'name', 'sysbench') if hasattr(self.workload, 'name') else 'sysbench'
+                    if workload_name in unique_workloads:
+                        idx = unique_workloads.index(workload_name)
+                        workload_features[0, idx] = 1.0
+                    else:
+                        # Default to first workload
+                        workload_features[0, 0] = 1.0
+                
+                # Add thread count (normalized)
+                threads = getattr(self, 'threads', 40)
+                if n_workload_features > 0:
+                    workload_features[0, -1] = threads / 100.0
+                
+                # Combine configuration and workload features
+                X_combined = np.hstack([x_action.reshape(1, -1), workload_features])
+                
+                # Predict resources
+                cpu_pred, _ = self.resource_models['model_cpu'].predict(X_combined)
+                read_io_pred, _ = self.resource_models['model_read_io'].predict(X_combined)
+                write_io_pred, _ = self.resource_models['model_write_io'].predict(X_combined)
+                
+                resource = [
+                    float(cpu_pred[0]),
+                    float(read_io_pred[0]),
+                    float(write_io_pred[0]),
+                    0, 0, 0, 0, 0  # Other metrics not predicted
+                ]
+            except Exception as e:
+                logger.warning('[Resource Models] Prediction failed: {}, using zeros'.format(e))
+                resource = [0] * 8
+        else:
+            resource = [0] * 8
+        
         return  external_metrics, internal_metrics, resource
 
     def initialize(self, collect_CPU=0):

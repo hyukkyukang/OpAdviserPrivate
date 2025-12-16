@@ -2,7 +2,7 @@ import os
 from setuptools import setup, find_packages
 
 
-req = ['mysql-connector-python-rf',
+req = ['mysql-connector-python',
        'matplotlib',
        'pyDOE',
        'scipy',

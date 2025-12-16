@@ -16,7 +16,7 @@ handlers:
     class: logging.FileHandler
     level: INFO
     formatter: simple
-    filename: open-box.log
+    filename: /tmp/open-box.log
 
 root:
   level: DEBUG

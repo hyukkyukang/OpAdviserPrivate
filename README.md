@@ -15,6 +15,7 @@ OpAdviser is an intelligent database tuning system that automatically optimizes 
   - [CPU & Disk I/O Focused Experiment](#-cpu--disk-io-focused-experiment-recommended)
 - [Configuration Options](#configuration-options)
 - [Supported Workloads](#supported-workloads)
+- [Resource Prediction Model Training](#resource-prediction-model-training)
 - [Project Structure](#project-structure)
 
 ---
@@ -800,17 +801,219 @@ OpAdviserPrivate/
 │   ├── pipleline/               # Main tuning pipeline
 │   ├── transfer/                # Transfer learning (RGPE, workload mapping)
 │   ├── selector/                # Knob selection (SHAP, FANOVA)
+│   ├── utils/
+│   │   └── resource_parser.py  # Resource data parsing utilities
 │   ├── tuner.py                 # Main DBTuner class
 │   ├── dbenv.py                 # Database environment
+│   ├── dbenv_bench.py           # BenchEnv with resource prediction
 │   └── knobs.py                 # Knob configuration handling
 ├── scripts/
 │   ├── optimize.py              # Main entry point
+│   ├── collect_resource_data.py # Resource data collection script
+│   ├── train_resource_model.py  # Resource model training script
+│   ├── evaluate_resource_model.py # Model evaluation utilities
 │   ├── config.ini               # Default configuration
 │   └── experiment/gen_knobs/    # Knob definition files
+├── resource_data/               # Collected resource training data
+├── resource_models/             # Trained resource prediction models
 ├── repo/                        # Historical tuning data (source knowledge)
 ├── logs/                        # Tuning logs
 └── requirements.txt             # Python dependencies
 ```
+
+---
+
+## Resource Prediction Model Training
+
+OpAdviser can predict CPU usage and Disk I/O for database configurations using trained Random Forest models. This enables fast evaluation without running actual benchmarks.
+
+### Overview
+
+The resource prediction models predict:
+- **CPU Usage** (%)
+- **Read I/O** (MB/s)
+- **Write I/O** (MB/s)
+
+These models achieve **<10% MAPE** (Mean Absolute Percentage Error) and can be used in `BenchEnv` for fast surrogate evaluation.
+
+### Quick Start: Training Resource Models
+
+#### Step 1: Collect Training Data
+
+Collect resource data from actual benchmark runs:
+
+```bash
+# Set environment variables
+export PYTHONPATH="."
+export MYSQL_SOCK=/var/run/mysqld/mysqld.sock
+
+# Collect 60 samples (~40 minutes)
+python scripts/collect_resource_data.py \
+    --num_samples 60 \
+    --output_dir resource_data
+```
+
+**What this does:**
+- Runs 60 benchmark iterations with random configurations
+- Each iteration: 30s benchmark + 5s warmup (~40s total)
+- Collects CPU, ReadIO, WriteIO metrics via `ResourceMonitor`
+- Saves data to `resource_data/resource_data.json`
+
+**Configuration:**
+- Uses `mysql_cpu_io_dynamic_15.json` (15 dynamic knobs)
+- `online_mode=True` (no MySQL restarts, faster)
+- `workload_time=30s` (minimal benchmark time)
+
+#### Step 2: Train Models
+
+Train Random Forest models on the collected data:
+
+```bash
+python scripts/train_resource_model.py \
+    --data_file resource_data/resource_data.json \
+    --knob_config scripts/experiment/gen_knobs/mysql_cpu_io_dynamic_15.json \
+    --knob_num 15 \
+    --output_dir resource_models \
+    --num_trees 100
+```
+
+**What this does:**
+- Splits data: 60% train, 20% val, 20% test
+- Trains 3 separate RF models (CPU, ReadIO, WriteIO)
+- Evaluates MAPE on validation and test sets
+- Saves models to `resource_models/resource_predictor.joblib`
+
+**Expected Output:**
+```
+Training complete in X.X minutes
+CPU MAPE:      X.XX% ✓
+Read I/O MAPE: X.XX% ✓
+Write I/O MAPE: X.XX% ✓
+All models <10% MAPE: ✓ PASS
+```
+
+#### Step 3: Use Trained Models
+
+The models are automatically loaded by `BenchEnv` when available:
+
+```python
+# In autotune/dbenv_bench.py, models are loaded automatically
+# if resource_models/resource_predictor.joblib exists
+
+# Models are used in get_states() to predict resources
+external_metrics, internal_metrics, resource = env.get_states(knobs)
+# resource[0] = predicted CPU
+# resource[1] = predicted ReadIO
+# resource[2] = predicted WriteIO
+```
+
+### Detailed Usage
+
+#### Data Collection Options
+
+```bash
+# Custom number of samples
+python scripts/collect_resource_data.py --num_samples 80
+
+# Use existing config file
+python scripts/collect_resource_data.py \
+    --config scripts/config_cpu_io_opadviser_ultrafast.ini \
+    --num_samples 60
+
+# Custom output directory
+python scripts/collect_resource_data.py \
+    --output_dir my_resource_data \
+    --num_samples 60
+```
+
+#### Training Options
+
+```bash
+# Adjust number of trees (more = better but slower)
+python scripts/train_resource_model.py \
+    --data_file resource_data/resource_data.json \
+    --knob_config scripts/experiment/gen_knobs/mysql_cpu_io_dynamic_15.json \
+    --knob_num 15 \
+    --num_trees 200  # Default: 100
+
+# Custom train/val/test split
+python scripts/train_resource_model.py \
+    --data_file resource_data/resource_data.json \
+    --knob_config scripts/experiment/gen_knobs/mysql_cpu_io_dynamic_15.json \
+    --knob_num 15 \
+    --test_size 0.15 \
+    --val_size 0.15
+```
+
+#### Evaluation
+
+Evaluate trained models on new data:
+
+```python
+from scripts.evaluate_resource_model import evaluate_all_models, calculate_mape
+import numpy as np
+
+# Load test data
+y_cpu_true = np.array([...])  # Actual CPU values
+y_cpu_pred = np.array([...])   # Predicted CPU values
+# ... same for read_io and write_io
+
+# Evaluate
+metrics = evaluate_all_models(
+    y_cpu_true, y_cpu_pred,
+    y_read_io_true, y_read_io_pred,
+    y_write_io_true, y_write_io_pred
+)
+
+# Check MAPE
+mape_cpu = calculate_mape(y_cpu_true, y_cpu_pred)
+print(f"CPU MAPE: {mape_cpu:.2f}%")
+```
+
+### Model Architecture
+
+- **Algorithm**: Random Forest with Instance Features
+- **Input**: Database configuration (knobs) + Workload features
+- **Output**: CPU usage, Read I/O, Write I/O
+- **Workload Features**: One-hot encoded workload type + normalized thread count
+- **Training Time**: ~10-15 minutes for 60 samples
+- **Prediction Time**: <1ms per configuration
+
+### File Structure
+
+```
+OpAdviserPrivate/
+├── scripts/
+│   ├── collect_resource_data.py      # Data collection script
+│   ├── train_resource_model.py        # Training script
+│   └── evaluate_resource_model.py     # Evaluation utilities
+├── autotune/
+│   ├── utils/
+│   │   └── resource_parser.py         # Data parsing utilities
+│   └── dbenv_bench.py                 # BenchEnv with resource prediction
+├── resource_data/                      # Collected training data
+│   └── resource_data.json
+└── resource_models/                   # Trained models
+    ├── resource_predictor.joblib      # Model file
+    └── training_metadata.json         # Training metadata
+```
+
+### Troubleshooting
+
+**Issue: MAPE > 10%**
+- Collect more samples (try 80-100)
+- Increase `num_trees` to 200
+- Check data quality (filter invalid samples)
+
+**Issue: Models not loading**
+- Verify `resource_models/resource_predictor.joblib` exists
+- Check file permissions
+- Ensure models were trained with same knob config
+
+**Issue: Poor predictions**
+- Ensure training data covers configuration space
+- Use stratified split by workload
+- Check for data quality issues (outliers, missing values)
 
 ---
 

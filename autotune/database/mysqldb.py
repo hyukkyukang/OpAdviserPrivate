@@ -7,6 +7,7 @@ import paramiko
 import logging
 import numpy as np
 import multiprocessing as mp
+import shutil
 from getpass import getpass
 from autotune.dbconnector import MysqlConnector
 from autotune.knobs import logger
@@ -36,7 +37,27 @@ class MysqlDB:
         self.dbname = args['dbname']
         self.sock = args['sock']
         self.pid = int(args['pid'])
-        self.mycnf = args['cnf']
+        # Copy config file to writable location if it's read-only (e.g., mounted volume)
+        original_cnf = args['cnf']
+        if not os.path.isabs(original_cnf):
+            # Resolve relative paths from current working directory
+            original_cnf = os.path.abspath(original_cnf)
+        # Check if file exists
+        if not os.path.exists(original_cnf):
+            logger.error(f"Config file not found: {original_cnf}")
+            raise FileNotFoundError(f"MySQL config file not found: {original_cnf}")
+        # Use a writable copy in /tmp to avoid permission issues with mounted volumes
+        writable_cnf = '/tmp/mysql_tuning.cnf'
+        try:
+            shutil.copy2(original_cnf, writable_cnf)
+            # Ensure the copied file is writable
+            os.chmod(writable_cnf, 0o644)
+            self.mycnf = writable_cnf
+            logger.info(f"Copied config file to writable location: {writable_cnf}")
+        except (PermissionError, IOError, OSError) as e:
+            # If copy fails, try to use original (might work in some cases)
+            logger.warning(f"Could not copy config file to writable location: {e}. Using original.")
+            self.mycnf = original_cnf
         self.mysqld = args['mysqld']
 
         # remote information
@@ -129,7 +150,10 @@ class MysqlDB:
                 continue
             cnf_parser.set(key, knobs[key])
 
-        cnf_parser.replace('mysql.cnf')
+        # Use a temp file in /tmp to avoid permission issues
+        import tempfile
+        temp_cnf = tempfile.mktemp(suffix='.cnf', dir='/tmp')
+        cnf_parser.replace(temp_cnf)
 
         if self.remote_mode:
             ssh = paramiko.SSHClient()
