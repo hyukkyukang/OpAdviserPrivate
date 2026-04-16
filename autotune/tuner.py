@@ -257,6 +257,8 @@ class DBTuner:
         #     plt.savefig('%s.png' % history2.task_id)
 #2024-11-11: code for experiment
 
+        return history
+
 
     @staticmethod
     def create_output_folders():

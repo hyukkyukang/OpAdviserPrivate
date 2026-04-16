@@ -6,9 +6,51 @@ import os
 import json
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Tuple, Optional
+from typing import Any, List, Dict, Tuple, Optional
 from autotune.knobs import initialize_knobs, knobDF2action
-from autotune.utils.history_container import HistoryContainer
+
+
+RESOURCE_KEYS = ['cpu', 'readIO', 'writeIO', 'virtualMem', 'physicalMem', 'dirty', 'hit', 'data']
+
+
+def _extract_resource_metrics(resource: Any) -> Optional[Tuple[float, float, float]]:
+    if isinstance(resource, dict):
+        try:
+            return (
+                float(resource.get('cpu', 0)),
+                float(resource.get('readIO', 0)),
+                float(resource.get('writeIO', 0)),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    if isinstance(resource, np.ndarray):
+        resource = resource.tolist()
+
+    if isinstance(resource, (list, tuple)) and len(resource) >= 3:
+        try:
+            return float(resource[0]), float(resource[1]), float(resource[2])
+        except (TypeError, ValueError):
+            return None
+
+    return None
+
+
+def _extract_workload_info(sample: Dict[str, Any]) -> Dict[str, Any]:
+    context = sample.get('context') or {}
+    workload = sample.get('workload') or {}
+    return {
+        'workload_type': (
+            workload.get('workload_type')
+            or workload.get('type')
+            or context.get('workload_type')
+            or context.get('workload')
+            or 'unknown'
+        ),
+        'workload_name': workload.get('workload_name') or workload.get('name') or context.get('workload_name') or 'unknown',
+        'threads': workload.get('threads') or context.get('threads') or 0,
+        'trial_state': sample.get('trial_state', 'UNKNOWN')
+    }
 
 
 def parse_resource_data_from_json(file_path: str, knob_config_file: str, knob_num: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[Dict]]:
@@ -61,25 +103,17 @@ def parse_resource_data_from_json(file_path: str, knob_config_file: str, knob_nu
         if not config_dict:
             continue
         
-        # Extract resource metrics
-        resource = sample.get('resource', [])
-        if not resource or len(resource) < 3:
+        resource_metrics = _extract_resource_metrics(sample.get('resource', []))
+        if resource_metrics is None:
             continue
-        
-        cpu = resource[0]
-        read_io = resource[1]
-        write_io = resource[2]
+
+        cpu, read_io, write_io = resource_metrics
         
         # Filter invalid data
         if cpu <= 0 or read_io < 0 or write_io < 0:
             continue
         
-        # Extract workload info
-        workload_info = {
-            'workload_type': sample.get('context', {}).get('workload_type', 'unknown'),
-            'threads': sample.get('context', {}).get('threads', 0),
-            'trial_state': sample.get('trial_state', 'UNKNOWN')
-        }
+        workload_info = _extract_workload_info(sample)
         
         configs_list.append(config_dict)
         cpu_list.append(cpu)
@@ -233,29 +267,22 @@ def parse_collection_data(file_path: str, knob_config_file: str, knob_num: int) 
         if not config_dict:
             continue
         
-        # Extract resource metrics (from collection script format)
-        resource = sample.get('resource', {})
-        if isinstance(resource, dict):
-            cpu = resource.get('cpu', 0)
-            read_io = resource.get('readIO', 0)
-            write_io = resource.get('writeIO', 0)
-        elif isinstance(resource, list) and len(resource) >= 3:
-            cpu = resource[0]
-            read_io = resource[1]
-            write_io = resource[2]
-        else:
+        resource_metrics = _extract_resource_metrics(sample.get('resource', {}))
+        if resource_metrics is None:
             continue
+
+        cpu, read_io, write_io = resource_metrics
         
         # Filter invalid data
         if cpu <= 0 or read_io < 0 or write_io < 0:
             continue
         
         # Extract workload info
-        workload = sample.get('workload', {})
+        workload = sample.get('workload') or {}
         workload_info = {
-            'workload_type': workload.get('workload_type', 'sbrw'),
+            'workload_type': workload.get('workload_type', workload.get('type', 'sbrw')),
             'threads': workload.get('threads', 40),
-            'workload_name': workload.get('type', 'sysbench')
+            'workload_name': workload.get('workload_name', workload.get('name', workload.get('type', 'sysbench')))
         }
         
         configs_list.append(config_dict)
@@ -285,4 +312,3 @@ def parse_collection_data(file_path: str, knob_config_file: str, knob_num: int) 
     Y_write_io = np.array(write_io_list)
     
     return X, Y_cpu, Y_read_io, Y_write_io, workload_info_list
-
